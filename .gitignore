@@ -1,0 +1,96 @@
+# ==================== Build Outputs ====================
+build/
+cmake-build-*/
+out/
+Debug/
+Release/
+
+# ==================== CMake ====================
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+compile_commands.json
+*.ninja
+
+# ==================== IDE / Editor ====================
+# VS Code
+.vscode/
+*.code-workspace
+
+# Keil MDK
+*.uvoptx
+*.uvguix*
+*.uvgx*
+Listings/
+Objects/
+RTE/
+*.scvd
+*.crf
+*.d
+*.o
+*.lst
+*.map
+*.htm
+*.lnp
+*.dep
+*.bak
+*.Administrator
+
+# IAR EWARM
+settings/
+*.xcl
+*.dni
+*.wsdt
+*.dbgdt
+Debug/
+Release/
+
+# STM32CubeIDE / Eclipse
+.settings/
+.cproject
+.project
+.metadata/
+Debug/
+Release/
+
+# CLion
+.idea/
+cmake-build-*/
+
+# ==================== STM32 / CubeMX ====================
+# CubeMX backup and temp
+*.launch
+.mxproject
+
+# ==================== Clangd ====================
+.cache/
+.clangd
+.clangd/
+compile_commands.json
+
+# ==================== OS Generated ====================
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# Linux
+*~
+
+# ==================== Misc ====================
+*.log
+*.tmp
+*.swp
+*.bak
+*.orig
