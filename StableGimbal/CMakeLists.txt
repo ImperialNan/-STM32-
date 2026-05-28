@@ -19,7 +19,7 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 # Set the project name
-set(CMAKE_PROJECT_NAME TEST)
+set(CMAKE_PROJECT_NAME StableGimbal)
 
 # Enable compile command to ease indexing with e.g. clangd
 set(CMAKE_EXPORT_COMPILE_COMMANDS TRUE)
@@ -46,13 +46,16 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     # BSP 驱动层
     BSP/Src/bsp_jy901s.c
-    BSP/Src/bsp_servo_rx28.c
-    BSP/Src/bsp_pid.c
+    BSP/Src/bsp_ax12a.c
+
+    # App 应用层（纯算法）
+    App/Src/pid_controller.c
 )
 
 # Add include paths
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     BSP/Inc
+    App/Inc
 )
 
 # Add project symbols (macros)

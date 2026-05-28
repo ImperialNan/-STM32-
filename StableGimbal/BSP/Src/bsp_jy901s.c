@@ -1,7 +1,7 @@
 /**
   ******************************************************************************
   * @file    bsp_jy901s.c
-  * @brief   JY901S 九轴 IMU 模块驱动实现（UART 中断模式）
+  * @brief   JY901S 九轴 IMU 模块驱动实现（DMA + IDLE 中断模式）
   ******************************************************************************
   */
 #include "bsp_jy901s.h"
@@ -11,21 +11,39 @@
 /* 模块级 UART 句柄 */
 static UART_HandleTypeDef *s_huart_jy901s = NULL;
 
-/* 单字节接收缓冲（非 static，供 main.c 回调使用） */
-uint8_t s_rx_byte;
-
 void JY901S_Init(JY901S_t *imu, UART_HandleTypeDef *huart)
 {
     s_huart_jy901s = huart;
 
     memset(imu, 0, sizeof(JY901S_t));
     imu->state = JY901S_STATE_WAIT_HEADER;
+    imu->dma_head = 0;
 }
 
-void JY901S_StartReceive(void)
+void JY901S_StartReceive(JY901S_t *imu)
 {
     if (s_huart_jy901s != NULL) {
-        HAL_UART_Receive_IT(s_huart_jy901s, &s_rx_byte, 1);
+        /* 启动 DMA 循环接收 */
+        HAL_UART_Receive_DMA(s_huart_jy901s, imu->dma_buf, JY901S_DMA_BUF_SIZE);
+        /* 使能 IDLE 中断 */
+        __HAL_UART_ENABLE_IT(s_huart_jy901s, UART_IT_IDLE);
+    }
+}
+
+void JY901S_IDLE_IRQHandler(JY901S_t *imu)
+{
+    if (__HAL_UART_GET_FLAG(s_huart_jy901s, UART_FLAG_IDLE)) {
+        __HAL_UART_CLEAR_IDLEFLAG(s_huart_jy901s);
+
+        /* 计算 DMA 写指针位置 */
+        uint16_t dma_pos = JY901S_DMA_BUF_SIZE
+                         - __HAL_DMA_GET_COUNTER(s_huart_jy901s->hdmarx);
+
+        /* 从 dma_head 到 dma_pos 逐字节送入解析状态机 */
+        while (imu->dma_head != dma_pos) {
+            JY901S_ProcessByte(imu, imu->dma_buf[imu->dma_head]);
+            imu->dma_head = (imu->dma_head + 1) % JY901S_DMA_BUF_SIZE;
+        }
     }
 }
 
