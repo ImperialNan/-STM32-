@@ -1,279 +1,364 @@
 /**
   ******************************************************************************
   * @file    pid_controller.c
-  * @brief   通用 PID 控制算法实现（增量式，支持单级和串级 PID）
+  * @brief   串级 PID 控制器实现
   *
-  *  增量式 PID 公式：
-  *    Δu(k) = Kp * [e(k) - e(k-1)] + Ki * e(k) + Kd * [e(k) - 2*e(k-1) + e(k-2)]
+  *  外环 (位置型):
+  *    u(k) = kp * e(k) + kiPerSec * dt * Σe + kd * [meas(k-1) - meas(k)] / dt
+  *    微分作用于测量值，避免设定值突变引发的微分冲击
+  *
+  *  内环 (增量型):
+  *    Δu(k) = kp*(e(k)-e(k-1)) + kiPerSec*dt*e(k) + kd/dt*(e(k)-2*e(k-1)+e(k-2))
   *    u(k)  = u(k-1) + Δu(k)
+  *
+  *  抗饱和:
+  *    - 外环: 输出硬钳位 + 条件积分 (内环饱和时冻结外环积分)
+  *    - 内环: 累计输出硬钳位 + 条件积分 (输出饱和时冻结积分)
+  *
+  *  前馈:
+  *    servoOffset += kff * fusedW   (IMU角速度直接补偿)
   ******************************************************************************
   */
 #include "pid_controller.h"
 #include <math.h>
+#include <string.h>
 
 /* ========================================================================== */
-/*  内部辅助函数                                                               */
+/*  内部工具函数                                                               */
 /* ========================================================================== */
 
-static float Clamp(float value, float limit)
-{
-    if (value > limit)  return limit;
-    if (value < -limit) return -limit;
-    return value;
+static inline float clamp(float v, float lim) {
+    if (v >  lim) return lim;
+    if (v < -lim) return -lim;
+    return v;
+}
+
+static inline float fdead(float v, float dz) {
+    if (fabsf(v) < dz) return 0.0f;
+    return v;
 }
 
 /* ========================================================================== */
-/*  单级 PID 控制器（增量式）                                                  */
+/*  位置型 PID                                                                 */
 /* ========================================================================== */
 
-void PID_Init(PID_Controller_t *pid, float Kp, float Ki, float Kd)
+void pidPosInit(PidPos *pid,
+                float kp, float kiPerSec, float kd,
+                float deadZone, float outAbsMax,
+                float outIncMax, float iAbsMax,
+                float dFilterAlpha)
 {
-    pid->Kp = Kp;
-    pid->Ki = Ki;
-    pid->Kd = Kd;
+    memset(pid, 0, sizeof(PidPos));
 
-    pid->dead_zone      = 0.0f;
-    pid->output_limit    = 100.0f;
+    pid->kp          = kp;
+    pid->kiPerSec    = kiPerSec;
+    pid->kd          = kd;
+    pid->deadZone    = deadZone;
+    pid->outAbsMax   = outAbsMax;
+    pid->outIncMax   = outIncMax;
+    pid->iAbsMax     = iAbsMax;
 
-    pid->d_filter_alpha = 1.0f;   /* 默认不滤波 */
-
-    pid->prev_error  = 0.0f;
-    pid->prev2_error = 0.0f;
-    pid->prev_delta_d = 0.0f;
-    pid->output      = 0.0f;
+    if (dFilterAlpha < 0.0f) dFilterAlpha = 0.0f;
+    if (dFilterAlpha > 1.0f) dFilterAlpha = 1.0f;
+    pid->dFilterAlpha = dFilterAlpha;
 }
 
-void PID_SetLimits(PID_Controller_t *pid, float dead_zone,
-                   float output_limit)
+float pidPosCompute(PidPos *pid, float setpoint, float measured, float dt)
 {
-    pid->dead_zone      = dead_zone;
-    pid->output_limit   = output_limit;
-}
-
-void PID_SetOutputLimit(PID_Controller_t *pid, float output_max)
-{
-    /* 限制累计输出的绝对值 */
-    if (pid->output > output_max) {
-        pid->output = output_max;
-    } else if (pid->output < -output_max) {
-        pid->output = -output_max;
-    }
-}
-
-void PID_Reset(PID_Controller_t *pid)
-{
-    pid->prev_error  = 0.0f;
-    pid->prev2_error = 0.0f;
-    pid->prev_delta_d = 0.0f;
-    pid->output      = 0.0f;
-}
-
-void PID_SetDerivativeFilter(PID_Controller_t *pid, float alpha)
-{
-    if (alpha < 0.0f) alpha = 0.0f;
-    if (alpha > 1.0f) alpha = 1.0f;
-    pid->d_filter_alpha = alpha;
-}
-
-float PID_Compute(PID_Controller_t *pid, float setpoint, float measured)
-{
-    float error = setpoint - measured;
-    float delta;
-
-    /* 死区处理 */
-    if (fabsf(error) < pid->dead_zone) {
-        error = 0.0f;
+    /* 防止 dt 异常 (首次调用或溢出) */
+    if (dt <= 0.0f || dt > 1.0f) {
+        dt = 0.01f;   /* fallback: 10ms */
     }
 
-    /* 增量式 PID：
-     *   Δu = Kp*(e(k)-e(k-1)) + Ki*e(k) + Kd*(e(k)-2*e(k-1)+e(k-2))
-     * 微分项经过一阶低通滤波：d_filtered = α * d_raw + (1-α) * d_prev
+    /* 1. 误差 & 死区 */
+    float error = fdead(setpoint - measured, pid->deadZone);
+
+    /* 2. 比例项 */
+    float P = pid->kp * error;
+
+    /* 3. 积分项 (条件积分 + 抗饱和) */
+    if (!pid->saturated) {
+        pid->integral += error * dt;
+        pid->integral  = clamp(pid->integral, pid->iAbsMax);
+    }
+    /* 饱和时不累加积分 (conditional integration) */
+    float I = pid->kiPerSec * pid->integral;
+
+    /* 4. 微分项 (作用于测量值, 带低通滤波)
+     *    D = -kd * d(meas)/dt ≈ -kd * (meas(k) - meas(k-1)) / dt
      */
-    float d_raw = error - 2.0f * pid->prev_error + pid->prev2_error;
-    float d_filtered = pid->d_filter_alpha * d_raw
-                     + (1.0f - pid->d_filter_alpha) * pid->prev_delta_d;
+    float dRaw = -(measured - pid->prevMeasured) / dt;  /* 负号: 微分作用于测量值 */
+    float dFilt = pid->dFilterAlpha * dRaw
+                + (1.0f - pid->dFilterAlpha) * pid->prevDeriv;
+    pid->prevDeriv = dFilt;
+    float D = pid->kd * dFilt;
 
-    delta = pid->Kp * (error - pid->prev_error)
-          + pid->Ki * error
-          + pid->Kd * d_filtered;
+    /* 5. 合成 & 增量限幅 */
+    float raw = P + I + D;
+    float inc = raw - pid->prevOutput;
+    inc = clamp(inc, pid->outIncMax);
+    float output = pid->prevOutput + inc;
 
-    pid->prev_delta_d = d_filtered;
+    /* 6. 绝对值硬钳位 */
+    pid->saturated = (output >= pid->outAbsMax || output <= -pid->outAbsMax);
+    output = clamp(output, pid->outAbsMax);
+
+    /* 7. 更新状态 */
+    pid->prevOutput  = output;
+    pid->prevMeasured = measured;
+
+    return output;
+}
+
+void pidPosReset(PidPos *pid)
+{
+    pid->integral     = 0.0f;
+    pid->prevMeasured = 0.0f;
+    pid->prevDeriv    = 0.0f;
+    pid->prevOutput   = 0.0f;
+    pid->saturated    = false;
+}
+
+/* ========================================================================== */
+/*  增量型 PID                                                                 */
+/* ========================================================================== */
+
+void pidIncInit(PidInc *pid,
+                float kp, float kiPerSec, float kd,
+                float deadZone, float outAbsMax,
+                float outIncMax,
+                float dFilterAlpha)
+{
+    memset(pid, 0, sizeof(PidInc));
+
+    pid->kp          = kp;
+    pid->kiPerSec    = kiPerSec;
+    pid->kd          = kd;
+    pid->deadZone    = deadZone;
+    pid->outAbsMax   = outAbsMax;
+    pid->outIncMax   = outIncMax;
+
+    if (dFilterAlpha < 0.0f) dFilterAlpha = 0.0f;
+    if (dFilterAlpha > 1.0f) dFilterAlpha = 1.0f;
+    pid->dFilterAlpha = dFilterAlpha;
+}
+
+float pidIncCompute(PidInc *pid, float setpoint, float measured, float dt)
+{
+    if (dt <= 0.0f || dt > 1.0f) {
+        dt = 0.01f;
+    }
+
+    float error = fdead(setpoint - measured, pid->deadZone);
+
+    /* 条件积分: 输出已饱和时冻结积分，防止 windup */
+    float kiEffective = pid->saturated ? 0.0f : pid->kiPerSec;
+
+    /* 增量式 PID:
+     * Δu = kp*(e(k)-e(k-1)) + kiPerSec*dt*e(k) + kd/dt*(e(k)-2*e(k-1)+e(k-2))
+     */
+    float dRaw = (error - 2.0f * pid->prevError + pid->prev2Error) / dt;
+    float dFilt = pid->dFilterAlpha * dRaw
+                + (1.0f - pid->dFilterAlpha) * pid->prevDeriv;
+    pid->prevDeriv = dFilt;
+
+    float delta = pid->kp * (error - pid->prevError)
+                + kiEffective * dt * error
+                + pid->kd * dFilt;
 
     /* 增量限幅 */
-    if (delta > pid->output_limit) {
-        delta = pid->output_limit;
-    } else if (delta < -pid->output_limit) {
-        delta = -pid->output_limit;
-    }
+    delta = clamp(delta, pid->outIncMax);
 
-    /* 累加到输出 */
+    /* 累加 & 绝对值钳位 */
     pid->output += delta;
+    pid->saturated = (pid->output >= pid->outAbsMax
+                   || pid->output <= -pid->outAbsMax);
+    pid->output = clamp(pid->output, pid->outAbsMax);
 
     /* 更新历史误差 */
-    pid->prev2_error = pid->prev_error;
-    pid->prev_error  = error;
+    pid->prev2Error = pid->prevError;
+    pid->prevError  = error;
 
     return pid->output;
 }
 
+void pidIncReset(PidInc *pid)
+{
+    pid->prevError  = 0.0f;
+    pid->prev2Error = 0.0f;
+    pid->prevDeriv  = 0.0f;
+    pid->output     = 0.0f;
+    pid->saturated  = false;
+}
 
 /* ========================================================================== */
 /*  传感器融合                                                                 */
 /* ========================================================================== */
 
-void SensorFusion_Compute(const SensorFeedback_t *feedback,
-                          float *fused_angle, float *fused_angular_vel)
+void sensorFusionUpdate(SensorData *s)
 {
-    switch (feedback->source) {
-    case SENSOR_SOURCE_IMU_ONLY:
-        /* 仅使用 IMU */
-        *fused_angle       = feedback->imu_angle;
-        *fused_angular_vel = feedback->imu_angular_vel;
+    switch (s->source) {
+
+    case SENSOR_SRC_IMU:
+        s->fusedAngle = s->imuAngle;
+        s->fusedW     = s->imuW;
         break;
 
-    case SENSOR_SOURCE_AX12A_ONLY:
-        /* 仅使用 AX-12A */
-        if (feedback->ax12a_valid) {
-            *fused_angle       = feedback->ax12a_angle;
-            *fused_angular_vel = feedback->ax12a_speed;
+    case SENSOR_SRC_AX12A:
+        if (s->ax12aValid) {
+            s->fusedAngle = s->ax12aAngle;
+            s->fusedW     = s->ax12aSpeed;
         } else {
-            /* AX-12A 数据无效时回退到 IMU */
-            *fused_angle       = feedback->imu_angle;
-            *fused_angular_vel = feedback->imu_angular_vel;
+            /* fallback to IMU */
+            s->fusedAngle = s->imuAngle;
+            s->fusedW     = s->imuW;
         }
         break;
 
-    case SENSOR_SOURCE_FUSION:
+    case SENSOR_SRC_FUSION:
     default:
-        /* IMU + AX-12A 加权融合 */
-        if (feedback->ax12a_valid) {
-            float w = feedback->imu_weight;
-            *fused_angle       = w * feedback->imu_angle       + (1.0f - w) * feedback->ax12a_angle;
-            *fused_angular_vel = w * feedback->imu_angular_vel + (1.0f - w) * feedback->ax12a_speed;
+        if (s->ax12aValid) {
+            float w = s->imuWeight;
+            s->fusedAngle = w * s->imuAngle + (1.0f - w) * s->ax12aAngle;
+            s->fusedW     = w * s->imuW     + (1.0f - w) * s->ax12aSpeed;
         } else {
-            /* AX-12A 数据无效时仅使用 IMU */
-            *fused_angle       = feedback->imu_angle;
-            *fused_angular_vel = feedback->imu_angular_vel;
+            s->fusedAngle = s->imuAngle;
+            s->fusedW     = s->imuW;
         }
         break;
     }
 }
 
-
 /* ========================================================================== */
-/*  串级 PID 控制器（增量式）                                                  */
+/*  串级 PID                                                                   */
 /* ========================================================================== */
 
-void CascadePID_Init(CascadePID_t *cascade,
-                     float outer_kp, float outer_ki, float outer_kd,
-                     float inner_kp, float inner_ki, float inner_kd)
+void cascadePidInit(CascadePid *c,
+                    float oKp, float oKi, float oKd,
+                    float oDeadZone, float oAbsMax, float oIncMax, float oIMax,
+                    float oDfAlpha,
+                    float iKp, float iKi, float iKd,
+                    float iDeadZone, float iAbsMax, float iIncMax,
+                    float iDfAlpha,
+                    float kff,
+                    float speedK, uint16_t spdMin, uint16_t spdMax)
 {
-    /* 初始化外环（角度环） */
-    PID_Init(&cascade->outer, outer_kp, outer_ki, outer_kd);
+    memset(c, 0, sizeof(CascadePid));
 
-    /* 初始化内环（角速度环） */
-    PID_Init(&cascade->inner, inner_kp, inner_ki, inner_kd);
+    /* 外环 (位置型) */
+    pidPosInit(&c->outer,
+               oKp, oKi, oKd,
+               oDeadZone, oAbsMax, oIncMax, oIMax,
+               oDfAlpha);
 
-    /* 默认限幅 */
-    cascade->outer_output_limit = 200.0f;   /* 最大角速度指令 200°/s */
-    cascade->inner_output_limit = 50.0f;    /* 最大舵机偏移 50° */
+    /* 内环 (增量型) */
+    pidIncInit(&c->inner,
+               iKp, iKi, iKd,
+               iDeadZone, iAbsMax, iIncMax,
+               iDfAlpha);
 
-    /* 中间量初始化 */
-    cascade->velocity_cmd = 0.0f;
+    /* 前馈 */
+    c->kff = kff;
 
-    /* 速度输出默认值 */
-    cascade->servo_speed = 200;
-    cascade->speed_gain  = 2.0f;   /* 每 1°/s 角速度误差 → 速度 +2 */
-    cascade->speed_min   = 50;
-    cascade->speed_max   = 1023;
-
-    /* 融合值初始化 */
-    cascade->fused_angle       = 0.0f;
-    cascade->fused_angular_vel = 0.0f;
+    /* 速度映射 */
+    c->speedK     = speedK;
+    c->speedMin   = spdMin;
+    c->speedMax   = spdMax;
+    c->servoSpeed = spdMin;
 }
 
-void CascadePID_SetLimits(CascadePID_t *cascade,
-                          float outer_dead_zone, float outer_delta_limit, float outer_output_limit,
-                          float inner_dead_zone, float inner_delta_limit, float inner_output_limit)
+void cascadePidReset(CascadePid *c)
 {
-    /* 外环限幅 */
-    PID_SetLimits(&cascade->outer, outer_dead_zone, outer_delta_limit);
-    cascade->outer_output_limit = outer_output_limit;
-
-    /* 内环限幅 */
-    PID_SetLimits(&cascade->inner, inner_dead_zone, inner_delta_limit);
-    cascade->inner_output_limit = inner_output_limit;
+    pidPosReset(&c->outer);
+    pidIncReset(&c->inner);
+    c->velocityCmd = 0.0f;
+    c->servoOffset = 0.0f;
+    c->servoSpeed  = c->speedMin;
+    c->outerSat    = false;
+    c->innerSat    = false;
+    memset(&c->sensor, 0, sizeof(SensorData));
 }
 
-void CascadePID_Reset(CascadePID_t *cascade)
+/* ── 一步完成 (内外环同频率, 简单模式) ── */
+
+float cascadePidCompute(CascadePid *c,
+                        float targetAngle, float dt)
 {
-    PID_Reset(&cascade->outer);
-    PID_Reset(&cascade->inner);
-    cascade->velocity_cmd = 0.0f;
-    cascade->servo_speed  = 200;
-    cascade->fused_angle     = 0.0f;
-    cascade->fused_angular_vel = 0.0f;
+    /* Step 0: 传感器融合 */
+    sensorFusionUpdate(&c->sensor);
+
+    /* Step 1: 外环 (位置型 PID, 角度 → 角速度指令) */
+    c->velocityCmd = pidPosCompute(&c->outer, targetAngle,
+                                    c->sensor.fusedAngle, dt);
+    c->outerSat = c->outer.saturated;
+
+    /* Step 2: 抗饱和 —— 内环饱和时通知外环 */
+    if (c->innerSat) {
+        c->outer.saturated = true;   /* 冻结外环积分 */
+    }
+
+    /* Step 3: 内环 (增量式 PID, 角速度 → 舵机偏移) */
+    c->servoOffset = pidIncCompute(&c->inner, c->velocityCmd,
+                                    c->sensor.fusedW, dt);
+    c->innerSat = c->inner.saturated;
+
+    /* Step 4: 角速度前馈 */
+    c->servoOffset += c->kff * c->sensor.fusedW;
+    c->servoOffset  = clamp(c->servoOffset, c->inner.outAbsMax);
+
+    /* Step 5: 速度计算 */
+    float velErr = fabsf(c->velocityCmd - c->sensor.fusedW);
+    float spdF   = c->speedK * velErr;
+    if (spdF < (float)c->speedMin) spdF = (float)c->speedMin;
+    if (spdF > (float)c->speedMax) spdF = (float)c->speedMax;
+    c->servoSpeed = (uint16_t)spdF;
+
+    return c->servoOffset;
 }
 
-float CascadePID_Compute(CascadePID_t *cascade, float target_angle,
-                          const SensorFeedback_t *feedback)
-{
-    /* Step 1: 传感器融合 */
-    SensorFusion_Compute(feedback,
-                         &cascade->fused_angle,
-                         &cascade->fused_angular_vel);
+/* ── 双速率模式: 仅外环 (低频, 如 10Hz) ── */
 
-    /* Step 2: 外环 PID（角度环，增量式） */
-    cascade->velocity_cmd = PID_Compute(&cascade->outer, target_angle, cascade->fused_angle);
-
-    /* 外环输出绝对值限幅 */
-    cascade->velocity_cmd = Clamp(cascade->velocity_cmd, cascade->outer_output_limit);
-
-    /* Step 3: 内环 PID（角速度环，增量式） */
-    float servo_offset = PID_Compute(&cascade->inner, cascade->velocity_cmd, cascade->fused_angular_vel);
-
-    /* 内环输出绝对值限幅 */
-    servo_offset = Clamp(servo_offset, cascade->inner_output_limit);
-
-    return servo_offset;
-}
-
-void CascadePID_ComputeOuter(CascadePID_t *cascade, float target_angle,
-                              const SensorFeedback_t *feedback)
+void cascadePidComputeOuter(CascadePid *c,
+                             float targetAngle, float dtOuter)
 {
     /* 传感器融合 */
-    SensorFusion_Compute(feedback,
-                         &cascade->fused_angle,
-                         &cascade->fused_angular_vel);
+    sensorFusionUpdate(&c->sensor);
 
-    /* 外环 PID（角度环）→ 角速度指令 */
-    cascade->velocity_cmd = PID_Compute(&cascade->outer, target_angle, cascade->fused_angle);
+    /* 外环 PID */
+    c->velocityCmd = pidPosCompute(&c->outer, targetAngle,
+                                    c->sensor.fusedAngle, dtOuter);
+    c->outerSat = c->outer.saturated;
 
-    /* 外环输出绝对值限幅 */
-    cascade->velocity_cmd = Clamp(cascade->velocity_cmd, cascade->outer_output_limit);
+    /* 抗饱和: 内环饱和 → 冻结外环积分 */
+    if (c->innerSat) {
+        c->outer.saturated = true;
+    }
+
+    /* 注: velocityCmd 在后续内环调用中保持不变 (零阶保持) */
 }
 
-float CascadePID_ComputeInner(CascadePID_t *cascade,
-                               const SensorFeedback_t *feedback)
+/* ── 双速率模式: 仅内环 (高频, 如 100Hz) ── */
+
+float cascadePidComputeInner(CascadePid *c, float dtInner)
 {
-    /* 更新融合值（内环需要最新的角速度） */
-    SensorFusion_Compute(feedback,
-                         &cascade->fused_angle,
-                         &cascade->fused_angular_vel);
+    /* 传感器融合 (更新角速度) */
+    sensorFusionUpdate(&c->sensor);
 
-    /* 内环 PID（角速度环）：使用外环输出的 velocity_cmd 作为目标
-     * 注：velocity_cmd 由外环 ComputeOuter 更新，此处保持不变（零阶保持） */
-    float servo_offset = PID_Compute(&cascade->inner, cascade->velocity_cmd, cascade->fused_angular_vel);
+    /* 内环 PID */
+    c->servoOffset = pidIncCompute(&c->inner, c->velocityCmd,
+                                    c->sensor.fusedW, dtInner);
+    c->innerSat = c->inner.saturated;
 
-    /* 内环输出绝对值限幅 */
-    servo_offset = Clamp(servo_offset, cascade->inner_output_limit);
+    /* 前馈 */
+    c->servoOffset += c->kff * c->sensor.fusedW;
+    c->servoOffset  = clamp(c->servoOffset, c->inner.outAbsMax);
 
-    /* 速度计算：speed = K * |角速度误差| */
-    float vel_error = fabsf(cascade->velocity_cmd - cascade->fused_angular_vel);
-    float speed_f = cascade->speed_gain * vel_error;
-    if (speed_f < (float)cascade->speed_min) speed_f = (float)cascade->speed_min;
-    if (speed_f > (float)cascade->speed_max) speed_f = (float)cascade->speed_max;
-    cascade->servo_speed = (uint16_t)speed_f;
+    /* 速度 */
+    float velErr = fabsf(c->velocityCmd - c->sensor.fusedW);
+    float spdF   = c->speedK * velErr;
+    if (spdF < (float)c->speedMin) spdF = (float)c->speedMin;
+    if (spdF > (float)c->speedMax) spdF = (float)c->speedMax;
+    c->servoSpeed = (uint16_t)spdF;
 
-    return servo_offset;
+    return c->servoOffset;
 }

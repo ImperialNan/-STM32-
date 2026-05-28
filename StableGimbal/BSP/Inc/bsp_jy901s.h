@@ -22,14 +22,14 @@ extern "C" {
 #define JY901S_FRAME_LEN       11
 
 /* DMA 接收缓冲区大小 */
-#define JY901S_DMA_BUF_SIZE    128
+#define JY901S_DMA_BUF_SIZE    256
 
 /* 解析状态机 */
 typedef enum {
     JY901S_STATE_WAIT_HEADER = 0,
     JY901S_STATE_WAIT_TYPE,
     JY901S_STATE_RECEIVING_DATA
-} JY901S_State_t;
+} Jy901sState;
 
 /* JY901S 数据结构 */
 typedef struct {
@@ -44,60 +44,60 @@ typedef struct {
     float yaw;      /* 航向角 -180~180 度 */
 
     /* 内部接收状态 */
-    JY901S_State_t state;
+    Jy901sState state;
     uint8_t  buffer[11];    /* 帧缓冲 */
-    uint8_t  rx_index;      /* 接收索引 */
-    uint8_t  frame_type;    /* 当前帧类型 */
-    volatile uint8_t  data_ready;    /* 数据就绪标志（新帧解析完成） */
+    uint8_t  rxIndex;       /* 接收索引 */
+    uint8_t  frameType;     /* 当前帧类型 */
+    volatile uint8_t  dataReady;    /* 数据就绪标志（新帧解析完成） */
 
     /* DMA 接收相关 */
-    uint8_t  dma_buf[JY901S_DMA_BUF_SIZE];  /* DMA 循环接收缓冲区 */
-    uint16_t dma_head;    /* DMA 缓冲区读指针 */
-} JY901S_t;
+    uint8_t  dmaBuf[JY901S_DMA_BUF_SIZE];  /* DMA 循环接收缓冲区 */
+    uint16_t dmaHead;     /* DMA 缓冲区读指针 */
+} Jy901s;
 
 /**
   * @brief  初始化 JY901S 模块
   * @param  imu: JY901S 句柄
   * @param  huart: 连接 JY901S 的 UART 句柄（USART2）
   */
-void JY901S_Init(JY901S_t *imu, UART_HandleTypeDef *huart);
+void jy901sInit(Jy901s *imu, UART_HandleTypeDef *huart);
 
 /**
   * @brief  启动 DMA+IDLE 接收
   * @param  imu: JY901S 句柄
   */
-void JY901S_StartReceive(JY901S_t *imu);
+void jy901sStartReceive(Jy901s *imu);
 
 /**
   * @brief  处理接收到的单字节（在 UART RXNE 回调中调用）
   * @param  imu: JY901S 句柄
   * @param  data: 接收到的字节
   */
-void JY901S_ProcessByte(JY901S_t *imu, uint8_t data);
+void jy901sProcessByte(Jy901s *imu, uint8_t data);
 
 /**
   * @brief  检查是否有新数据就绪
   * @param  imu: JY901S 句柄
   * @retval 1=有新数据, 0=无
   */
-uint8_t JY901S_IsDataReady(JY901S_t *imu);
+uint8_t jy901sIsDataReady(Jy901s *imu);
 
 /**
   * @brief  清除数据就绪标志
   */
-void JY901S_ClearDataReady(JY901S_t *imu);
+void jy901sClearDataReady(Jy901s *imu);
 
 /**
   * @brief  获取 JY901S UART 句柄指针（用于中断回调）
   */
-UART_HandleTypeDef* JY901S_GetUartHandle(void);
+UART_HandleTypeDef* jy901sGetUartHandle(void);
 
 /**
   * @brief  处理 DMA+IDLE 中断接收到的数据块
   * @note   在 USART2 IDLE 中断中调用
   * @param  imu: JY901S 句柄
   */
-void JY901S_IDLE_IRQHandler(JY901S_t *imu);
+void jy901sIdleIrqHandler(Jy901s *imu);
 
 #ifdef __cplusplus
 }

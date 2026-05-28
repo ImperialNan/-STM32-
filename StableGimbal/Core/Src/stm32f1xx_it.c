@@ -252,9 +252,9 @@ void USART2_IRQHandler(void)
 {
   /* USER CODE BEGIN USART2_IRQn 0 */
   /* IDLE 中断：DMA 接收到一帧数据后触发 */
-  extern JY901S_t g_jy901s;
+  extern Jy901s g_jy901s;
   if (__HAL_UART_GET_FLAG(&huart2, UART_FLAG_IDLE)) {
-      JY901S_IDLE_IRQHandler(&g_jy901s);
+      jy901sIdleIrqHandler(&g_jy901s);
   }
   /* USER CODE END USART2_IRQn 0 */
   HAL_UART_IRQHandler(&huart2);

@@ -69,20 +69,20 @@ extern "C" {
   */
 typedef struct {
     /* 原始数据 */
-    uint16_t raw_position;    /* 原始位置值 (0~1023) */
-    uint16_t raw_speed;       /* 原始速度值 (0~2047) */
-    uint16_t raw_load;        /* 原始负载值 (0~2047) */
+    uint16_t rawPosition;   /* 原始位置值 (0~1023) */
+    uint16_t rawSpeed;      /* 原始速度值 (0~2047) */
+    uint16_t rawLoad;       /* 原始负载值 (0~2047) */
 
     /* 物理量 */
-    float angle_deg;          /* 当前角度 (°) */
-    float speed_dps;          /* 当前角速度 (°/s) */
-    float load_pct;           /* 当前负载 (%) */
+    float angleDeg;         /* 当前角度 (°) */
+    float speedDps;         /* 当前角速度 (°/s) */
+    float loadPct;          /* 当前负载 (%) */
 
     /* 状态 */
-    uint8_t data_valid;       /* 数据有效标志 (1=有效) */
-    uint32_t timestamp;       /* 最后更新时间戳 (ms) */
-    uint8_t error_code;       /* Dynamixel 错误码 */
-} AX12A_Data_t;
+    uint8_t dataValid;      /* 数据有效标志 (1=有效) */
+    uint32_t timestamp;     /* 最后更新时间戳 (ms) */
+    uint8_t errorCode;      /* Dynamixel 错误码 */
+} Ax12aData;
 
 /**
   * @brief  AX-12A 实例结构体（统一：控制 + 反馈）
@@ -93,12 +93,12 @@ typedef struct {
     uint8_t id;                  /* 舵机 ID */
 
     /* 软件限位 */
-    float angle_min;             /* 软件角度下限 (°) */
-    float angle_max;             /* 软件角度上限 (°) */
+    float angleMin;              /* 软件角度下限 (°) */
+    float angleMax;              /* 软件角度上限 (°) */
 
     /* 反馈数据 */
-    AX12A_Data_t feedback;       /* 反馈数据 */
-} AX12A_t;
+    Ax12aData feedback;          /* 反馈数据 */
+} Ax12a;
 
 /* ========================================================================== */
 /*  初始化                                                                     */
@@ -109,11 +109,11 @@ typedef struct {
   * @param  ax12a: AX-12A 句柄
   * @param  huart: UART 句柄 (USART3)
   * @param  id: 舵机 ID (1~254)
-  * @param  angle_min: 软件角度下限
-  * @param  angle_max: 软件角度上限
+  * @param  angleMin: 软件角度下限
+  * @param  angleMax: 软件角度上限
   */
-void AX12A_Init(AX12A_t *ax12a, UART_HandleTypeDef *huart,
-                uint8_t id, float angle_min, float angle_max);
+void ax12aInit(Ax12a *ax12a, UART_HandleTypeDef *huart,
+               uint8_t id, float angleMin, float angleMax);
 
 /* ========================================================================== */
 /*  写入控制（目标位置/速度）                                                   */
@@ -126,7 +126,7 @@ void AX12A_Init(AX12A_t *ax12a, UART_HandleTypeDef *huart,
   * @param  speed: 运动速度（0~1023）
   * @retval HAL_OK / HAL_ERROR / HAL_TIMEOUT
   */
-HAL_StatusTypeDef AX12A_SetPosition(AX12A_t *ax12a, float angle, uint16_t speed);
+HAL_StatusTypeDef ax12aSetPosition(Ax12a *ax12a, float angle, uint16_t speed);
 
 /**
   * @brief  同时设置多个舵机位置（SYNC WRITE）
@@ -137,19 +137,19 @@ HAL_StatusTypeDef AX12A_SetPosition(AX12A_t *ax12a, float angle, uint16_t speed)
   * @param  count: 舵机数量
   * @retval HAL_OK / HAL_ERROR / HAL_TIMEOUT
   */
-HAL_StatusTypeDef AX12A_SyncWrite(UART_HandleTypeDef *huart,
-                                  const uint8_t *ids,
-                                  const uint16_t *positions,
-                                  const uint16_t *speeds,
-                                  uint8_t count);
+HAL_StatusTypeDef ax12aSyncWrite(UART_HandleTypeDef *huart,
+                                 const uint8_t *ids,
+                                 const uint16_t *positions,
+                                 const uint16_t *speeds,
+                                 uint8_t count);
 
 /**
   * @brief  设置舵机波特率
   * @param  ax12a: AX-12A 句柄
-  * @param  bps_code: 波特率代码
+  * @param  bpsCode: 波特率代码
   * @retval HAL_OK / HAL_ERROR / HAL_TIMEOUT
   */
-HAL_StatusTypeDef AX12A_SetBaudrate(AX12A_t *ax12a, uint8_t bps_code);
+HAL_StatusTypeDef ax12aSetBaudrate(Ax12a *ax12a, uint8_t bpsCode);
 
 /* ========================================================================== */
 /*  反馈读取（当前位置/速度/负载）                                              */
@@ -160,36 +160,36 @@ HAL_StatusTypeDef AX12A_SetBaudrate(AX12A_t *ax12a, uint8_t bps_code);
   * @param  ax12a: AX-12A 句柄
   * @retval HAL_OK / HAL_ERROR / HAL_TIMEOUT
   */
-HAL_StatusTypeDef AX12A_ReadFeedback(AX12A_t *ax12a);
+HAL_StatusTypeDef ax12aReadFeedback(Ax12a *ax12a);
 
 /**
   * @brief  获取 AX-12A 反馈数据指针
   * @param  ax12a: AX-12A 句柄
-  * @retval AX12A_Data_t 指针
+  * @retval Ax12aData 指针
   */
-AX12A_Data_t* AX12A_GetFeedback(AX12A_t *ax12a);
+Ax12aData* ax12aGetFeedback(Ax12a *ax12a);
 
 /**
   * @brief  检查 AX-12A 数据是否有效（超时检测）
   * @param  ax12a: AX-12A 句柄
-  * @param  timeout_ms: 超时时间 (ms)
+  * @param  timeoutMs: 超时时间 (ms)
   * @retval 1=有效, 0=超时
   */
-uint8_t AX12A_IsDataValid(AX12A_t *ax12a, uint32_t timeout_ms);
+uint8_t ax12aIsDataValid(Ax12a *ax12a, uint32_t timeoutMs);
 
 /**
   * @brief  AX-12A 位置→角度转换
   * @param  position: 原始位置值 (0~1023)
   * @retval 角度 (°)
   */
-float AX12A_PositionToAngle(uint16_t position);
+float ax12aPositionToAngle(uint16_t position);
 
 /**
   * @brief  AX-12A 速度→角速度转换
   * @param  speed: 原始速度值 (0~2047)
   * @retval 角速度 (°/s)，正值=CCW，负值=CW
   */
-float AX12A_SpeedToDPS(uint16_t speed);
+float ax12aSpeedToDps(uint16_t speed);
 
 /* ========================================================================== */
 /*  诊断                                                                       */
@@ -200,7 +200,7 @@ float AX12A_SpeedToDPS(uint16_t speed);
   * @param  ax12a: AX-12A 句柄
   * @retval HAL_OK=在线, HAL_ERROR/HAL_TIMEOUT=离线
   */
-HAL_StatusTypeDef AX12A_Ping(AX12A_t *ax12a);
+HAL_StatusTypeDef ax12aPing(Ax12a *ax12a);
 
 #ifdef __cplusplus
 }

@@ -54,22 +54,17 @@ DMA_HandleTypeDef hdma_usart2_rx;
 
 /* USER CODE BEGIN PV */
 /* 全局实例 */
-JY901S_t g_jy901s;
+Jy901s g_jy901s;
 
-/* AX-12A 舵机（统一驱动：执行控制 + 反馈读取） */
-AX12A_t g_ax12a_pitch;        /* ID=1, 俯仰 */
-AX12A_t g_ax12a_roll;         /* ID=2, 横滚 */
-AX12A_t g_ax12a_yaw;          /* ID=3, 航向 */
+/* AX-12A 舵机 */
+Ax12a g_ax12aPitch;    /* ID=1, 俯仰 */
+Ax12a g_ax12aRoll;     /* ID=2, 横滚 */
+Ax12a g_ax12aYaw;      /* ID=3, 航向 */
 
-/* 串级 PID 控制器 */
-CascadePID_t g_cascade_pitch;
-CascadePID_t g_cascade_roll;
-CascadePID_t g_cascade_yaw;
-
-/* 传感器反馈数据 */
-SensorFeedback_t g_feedback_pitch;
-SensorFeedback_t g_feedback_roll;
-SensorFeedback_t g_feedback_yaw;
+/* 串级 PID 控制器 (传感器数据内嵌在 CascadePid.sensor 中) */
+CascadePid g_cascadePitch;
+CascadePid g_cascadeRoll;
+CascadePid g_cascadeYaw;
 
 /* printf 重定向到 USART1 */
 #ifdef __GNUC__
@@ -98,10 +93,20 @@ static void MX_TIM2_Init(void);
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 /* 控制环标志（由 TIM2 中断置位） */
-volatile uint8_t g_control_flag = 0;
+volatile uint8_t g_controlFlag = 0;
 
-/* 外环分频计数器（100Hz / 10 = 10Hz 外环） */
-#define OUTER_LOOP_DIVIDER  10
+/* 双速率分频 */
+#define OUTER_DIV  10   /* 100Hz / 10 = 10Hz 外环 */
+#define FB_DIV      5   /* 100Hz / 5  = 20Hz 舵机反馈读取 */
+
+/* 控制周期 (s) */
+#define DT_OUTER  0.1f  /* 外环 dt = 100ms */
+#define DT_INNER  0.01f /* 内环 dt = 10ms  */
+
+/* 舵机中立位 (AX-12A 角度值) */
+#define PITCH_NEUTRAL  240.0f
+#define ROLL_NEUTRAL   150.0f
+#define YAW_NEUTRAL    150.0f
 
 /* USER CODE END 0 */
 
@@ -145,46 +150,55 @@ int main(void)
   /* ══════════════════════════════════════════════════════════════ */
 
   /* JY901S IMU */
-  JY901S_Init(&g_jy901s, &huart2);
+  jy901sInit(&g_jy901s, &huart2);
 
-  /* AX-12A 舵机（统一驱动：同时具备执行控制和反馈读取能力） */
-  AX12A_Init(&g_ax12a_pitch, &huart3, 1, 0.0f, 300.0f);
-  AX12A_Init(&g_ax12a_roll,  &huart3, 2, 0.0f, 300.0f);
-  AX12A_Init(&g_ax12a_yaw,   &huart3, 3, 100.0f, 200.0f);
+  /* AX-12A 舵机 */
+  ax12aInit(&g_ax12aPitch, &huart3, 1, 0.0f, 300.0f);
+  ax12aInit(&g_ax12aRoll,  &huart3, 2, 0.0f, 300.0f);
+  ax12aInit(&g_ax12aYaw,   &huart3, 3, 100.0f, 200.0f);
 
   /* ══════════════════════════════════════════════════════════════ */
   /*  串级 PID 初始化                                               */
-  /*  外环: 角度环 (目标角度 → 角速度指令)                           */
-  /*  内环: 角速度环 (角速度指令 → 舵机偏移)                         */
+  /*  外环 (位置型): 角度 → 角速度指令, 10Hz                         */
+  /*  内环 (增量型): 角速度 → 舵机偏移, 100Hz                        */
   /* ══════════════════════════════════════════════════════════════ */
+  /*
+   *  cascadePidInit(c,
+   *      外环 kp, ki(/s), kd, 死区°, absMax(°/s), incMax(°/s), iMax(°/s), dfAlpha,
+   *      内环 kp, ki(/s), kd, 死区(°/s), absMax(°), incMax(°), dfAlpha,
+   *      kff,  speedK, spdMin, spdMax);
+   */
 
-  /*                        外环(Kp,Ki,Kd)      内环(Kp,Ki,Kd)    */
-  CascadePID_Init(&g_cascade_pitch, 2.0f, 0.05f, 0.8f,  0.5f, 0.02f, 0.1f);
-  CascadePID_Init(&g_cascade_roll,  2.0f, 0.05f, 0.8f,  0.5f, 0.02f, 0.1f);
-  CascadePID_Init(&g_cascade_yaw,   1.5f, 0.03f, 0.6f,  0.4f, 0.02f, 0.08f);
+  /* PITCH */
+  cascadePidInit(&g_cascadePitch,
+      2.0f, 0.5f, 0.8f, 0.3f, 150.0f, 10.0f, 50.0f, 0.3f,
+      0.5f, 2.0f, 0.1f, 0.3f,  40.0f,  5.0f,        0.3f,
+      0.05f, 2.0f, 50, 1023);
 
-  /* 限幅: 外环(死区°, 增量限幅°/s, 输出绝对值限幅°/s)  内环(死区°/s, 增量限幅°, 输出绝对值限幅°) */
-  CascadePID_SetLimits(&g_cascade_pitch, 0.3f, 10.0f, 150.0f,  2.0f,  5.0f, 40.0f);
-  CascadePID_SetLimits(&g_cascade_roll,  0.5f, 10.0f, 150.0f,  2.0f,  5.0f, 40.0f);
-  CascadePID_SetLimits(&g_cascade_yaw,   0.5f,  8.0f, 100.0f,  2.0f,  4.0f, 30.0f);
+  /* ROLL */
+  cascadePidInit(&g_cascadeRoll,
+      2.0f, 0.5f, 0.8f, 0.5f, 150.0f, 10.0f, 50.0f, 0.3f,
+      0.5f, 2.0f, 0.1f, 0.3f,  40.0f,  5.0f,        0.3f,
+      0.05f, 2.0f, 50, 1023);
 
-  /* 内环微分滤波（抑制舵机反馈噪声） */
-  PID_SetDerivativeFilter(&g_cascade_pitch.inner, 0.3f);
-  PID_SetDerivativeFilter(&g_cascade_roll.inner,  0.3f);
-  PID_SetDerivativeFilter(&g_cascade_yaw.inner,   0.3f);
+  /* YAW */
+  cascadePidInit(&g_cascadeYaw,
+      1.5f, 0.3f, 0.6f, 0.5f, 100.0f,  8.0f, 40.0f, 0.3f,
+      0.4f, 2.0f, 0.08f,0.3f,  30.0f,  4.0f,        0.3f,
+      0.04f, 2.0f, 50, 1023);
 
   /* 传感器融合配置 */
-  g_feedback_pitch.source     = SENSOR_SOURCE_FUSION;
-  g_feedback_pitch.imu_weight = 0.7f;
+  g_cascadePitch.sensor.source     = SENSOR_SRC_FUSION;
+  g_cascadePitch.sensor.imuWeight  = 0.7f;
 
-  g_feedback_roll.source      = SENSOR_SOURCE_FUSION;
-  g_feedback_roll.imu_weight  = 0.7f;
+  g_cascadeRoll.sensor.source      = SENSOR_SRC_FUSION;
+  g_cascadeRoll.sensor.imuWeight   = 0.7f;
 
-  g_feedback_yaw.source       = SENSOR_SOURCE_FUSION;
-  g_feedback_yaw.imu_weight   = 0.6f;
+  g_cascadeYaw.sensor.source       = SENSOR_SRC_FUSION;
+  g_cascadeYaw.sensor.imuWeight    = 0.6f;
 
   /* 启动 IMU DMA+IDLE 接收 */
-  JY901S_StartReceive(&g_jy901s);
+  jy901sStartReceive(&g_jy901s);
 
   /* 启动 TIM2 定时器中断（100Hz 控制节拍） */
   HAL_TIM_Base_Start_IT(&htim2);
@@ -200,79 +214,103 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    if (g_control_flag) {
-      g_control_flag = 0;
+    if (g_controlFlag) {
+      g_controlFlag = 0;
 
-      /* 读取 AX-12A 反馈 */
-      AX12A_ReadFeedback(&g_ax12a_pitch);
-      AX12A_ReadFeedback(&g_ax12a_roll);
-      AX12A_ReadFeedback(&g_ax12a_yaw);
+      /* ═══════════════════════════════════════════════════════ */
+      /*  舵机反馈读取 (降频至 20Hz)                              */
+      /* ═══════════════════════════════════════════════════════ */
+      static uint8_t fbCnt = 0;
+      if (++fbCnt >= FB_DIV) {
+          fbCnt = 0;
+          ax12aReadFeedback(&g_ax12aPitch);
+          ax12aReadFeedback(&g_ax12aRoll);
+          ax12aReadFeedback(&g_ax12aYaw);
+      }
 
-      /* 填充传感器反馈 */
-      g_feedback_pitch.imu_angle       = g_jy901s.pitch;
-      g_feedback_pitch.imu_angular_vel = g_jy901s.wx;
-      g_feedback_pitch.ax12a_angle     = g_ax12a_pitch.feedback.angle_deg;
-      g_feedback_pitch.ax12a_speed     = g_ax12a_pitch.feedback.speed_dps;
-      g_feedback_pitch.ax12a_valid     = g_ax12a_pitch.feedback.data_valid;
+      /* ═══════════════════════════════════════════════════════ */
+      /*  填充传感器原始数据 (关中断防止 IMU 数据竞态)            */
+      /* ═══════════════════════════════════════════════════════ */
+      __disable_irq();
+      float imuPitch  = g_jy901s.pitch;
+      float imuRoll   = g_jy901s.roll;
+      float imuYaw    = g_jy901s.yaw;
+      float imuWx     = g_jy901s.wx;
+      float imuWy     = g_jy901s.wy;
+      float imuWz     = g_jy901s.wz;
+      __enable_irq();
 
-      g_feedback_roll.imu_angle       = g_jy901s.roll;
-      g_feedback_roll.imu_angular_vel = g_jy901s.wy;
-      g_feedback_roll.ax12a_angle     = g_ax12a_roll.feedback.angle_deg;
-      g_feedback_roll.ax12a_speed     = g_ax12a_roll.feedback.speed_dps;
-      g_feedback_roll.ax12a_valid     = g_ax12a_roll.feedback.data_valid;
+      g_cascadePitch.sensor.imuAngle    = imuPitch;
+      g_cascadePitch.sensor.imuW        = imuWx;
+      g_cascadePitch.sensor.ax12aAngle  = g_ax12aPitch.feedback.angleDeg;
+      g_cascadePitch.sensor.ax12aSpeed  = g_ax12aPitch.feedback.speedDps;
+      g_cascadePitch.sensor.ax12aValid  = g_ax12aPitch.feedback.dataValid;
 
-      g_feedback_yaw.imu_angle       = g_jy901s.yaw;
-      g_feedback_yaw.imu_angular_vel = g_jy901s.wz;
-      g_feedback_yaw.ax12a_angle     = g_ax12a_yaw.feedback.angle_deg;
-      g_feedback_yaw.ax12a_speed     = g_ax12a_yaw.feedback.speed_dps;
-      g_feedback_yaw.ax12a_valid     = g_ax12a_yaw.feedback.data_valid;
+      g_cascadeRoll.sensor.imuAngle     = imuRoll;
+      g_cascadeRoll.sensor.imuW         = imuWy;
+      g_cascadeRoll.sensor.ax12aAngle   = g_ax12aRoll.feedback.angleDeg;
+      g_cascadeRoll.sensor.ax12aSpeed   = g_ax12aRoll.feedback.speedDps;
+      g_cascadeRoll.sensor.ax12aValid   = g_ax12aRoll.feedback.dataValid;
+
+      g_cascadeYaw.sensor.imuAngle      = imuYaw;
+      g_cascadeYaw.sensor.imuW          = imuWz;
+      g_cascadeYaw.sensor.ax12aAngle    = g_ax12aYaw.feedback.angleDeg;
+      g_cascadeYaw.sensor.ax12aSpeed    = g_ax12aYaw.feedback.speedDps;
+      g_cascadeYaw.sensor.ax12aValid    = g_ax12aYaw.feedback.dataValid;
 
       /* ═══════════════════════════════════════════════════════ */
       /*  双速率串级 PID 控制                                     */
-      /*  外环: 10Hz (每 OUTER_LOOP_DIVIDER 次内环执行一次)       */
-      /*  内环: 100Hz (每次 TIM2 中断都执行)                      */
+      /*  外环: 10Hz | 内环: 100Hz                                */
       /* ═══════════════════════════════════════════════════════ */
-      static uint8_t outer_div_cnt = 0;
+      static uint8_t outerDivCnt = 0;
 
-      if (++outer_div_cnt >= OUTER_LOOP_DIVIDER) {
-          outer_div_cnt = 0;
+      if (++outerDivCnt >= OUTER_DIV) {
+          outerDivCnt = 0;
 
-          /* 外环 PID（角度环，10Hz） */
-          CascadePID_ComputeOuter(&g_cascade_pitch, 0.0f,   &g_feedback_pitch);
-          CascadePID_ComputeOuter(&g_cascade_roll,  0.0f,   &g_feedback_roll);
-          CascadePID_ComputeOuter(&g_cascade_yaw,  -143.0f, &g_feedback_yaw);
+          /* 外环 PID (位置型, 10Hz) */
+          cascadePidComputeOuter(&g_cascadePitch,  0.0f,   DT_OUTER);
+          cascadePidComputeOuter(&g_cascadeRoll,   0.0f,   DT_OUTER);
+          cascadePidComputeOuter(&g_cascadeYaw,  -143.0f,  DT_OUTER);
       }
 
-      /* 内环 PID（角速度环，100Hz） */
-      float pitch_offset = CascadePID_ComputeInner(&g_cascade_pitch, &g_feedback_pitch);
-      float roll_offset  = CascadePID_ComputeInner(&g_cascade_roll,  &g_feedback_roll);
-      float yaw_offset   = CascadePID_ComputeInner(&g_cascade_yaw,   &g_feedback_yaw);
+      /* 内环 PID (增量型, 100Hz) */
+      float pitchOff = cascadePidComputeInner(&g_cascadePitch, DT_INNER);
+      float rollOff  = cascadePidComputeInner(&g_cascadeRoll,  DT_INNER);
+      float yawOff   = cascadePidComputeInner(&g_cascadeYaw,   DT_INNER);
 
-      /* 输出到舵机（SyncWrite 批量下发，速度由 PID 动态计算） */
+      /* ═══════════════════════════════════════════════════════ */
+      /*  输出到舵机 (SyncWrite 批量下发)                         */
+      /* ═══════════════════════════════════════════════════════ */
       {
-          uint8_t  ids[3]       = {1, 2, 3};
-          uint16_t positions[3] = {
-              (uint16_t)((240.0f + pitch_offset) * AX12A_DEG_TO_POS),
-              (uint16_t)((150.0f + roll_offset)  * AX12A_DEG_TO_POS),
-              (uint16_t)((150.0f - yaw_offset)   * AX12A_DEG_TO_POS)
+          uint8_t  ids[3]  = {1, 2, 3};
+          uint16_t pos[3]  = {
+              (uint16_t)((PITCH_NEUTRAL + pitchOff) * AX12A_DEG_TO_POS),
+              (uint16_t)((ROLL_NEUTRAL  + rollOff)  * AX12A_DEG_TO_POS),
+              (uint16_t)((YAW_NEUTRAL   - yawOff)   * AX12A_DEG_TO_POS)
           };
-          uint16_t speeds[3] = {
-              g_cascade_pitch.servo_speed,
-              g_cascade_roll.servo_speed,
-              g_cascade_yaw.servo_speed
+          uint16_t spd[3]  = {
+              g_cascadePitch.servoSpeed,
+              g_cascadeRoll.servoSpeed,
+              g_cascadeYaw.servoSpeed
           };
-          AX12A_SyncWrite(&huart3, ids, positions, speeds, 3);
+          ax12aSyncWrite(&huart3, ids, pos, spd, 3);
       }
 
-      /* 调试输出（每 10 帧打印一次） */
-      static uint16_t print_div = 0;
-      if (++print_div >= 10) {
-          print_div = 0;
-          printf("P:%6.1f/%6.1f R:%6.1f/%6.1f Y:%6.1f/%6.1f | out: %5.1f %5.1f %5.1f\r\n",
-                 g_cascade_pitch.fused_angle, g_jy901s.pitch,
-                 g_cascade_roll.fused_angle,  g_jy901s.roll,
-                 g_cascade_yaw.fused_angle,   g_jy901s.yaw,
-                 pitch_offset, roll_offset, yaw_offset);
+      /* ═══════════════════════════════════════════════════════ */
+      /*  调试输出 (每 10 帧, 约 10Hz)，release可删除             */
+      /* ═══════════════════════════════════════════════════════ */
+      static uint16_t dbgCnt = 0;
+      if (++dbgCnt >= 10) {
+          dbgCnt = 0;
+          printf("P:%.1f/%.1f R:%.1f/%.1f Y:%.1f/%.1f"
+                 " | off:%+.1f %+.1f %+.1f"
+                 " | sat_o:%d%d%d sat_i:%d%d%d\r\n",
+                 g_cascadePitch.sensor.fusedAngle, imuPitch,
+                 g_cascadeRoll.sensor.fusedAngle,  imuRoll,
+                 g_cascadeYaw.sensor.fusedAngle,   imuYaw,
+                 pitchOff, rollOff, yawOff,
+                 g_cascadePitch.outerSat, g_cascadeRoll.outerSat, g_cascadeYaw.outerSat,
+                 g_cascadePitch.innerSat, g_cascadeRoll.innerSat, g_cascadeYaw.innerSat);
       }
 
       LED_Toggle();
@@ -535,7 +573,7 @@ static void MX_GPIO_Init(void)
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
     if (htim->Instance == TIM2) {
-        g_control_flag = 1;
+        g_controlFlag = 1;
     }
 }
 /* USER CODE END 4 */
