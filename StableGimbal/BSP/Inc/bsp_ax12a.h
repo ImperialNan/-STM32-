@@ -202,6 +202,35 @@ float ax12aSpeedToDps(uint16_t speed);
   */
 HAL_StatusTypeDef ax12aPing(Ax12a *ax12a);
 
+/* ========================================================================== */
+/*  非阻塞反馈读取（DMA+IDLE，替代阻塞式 ax12aReadFeedback）                     */
+/* ========================================================================== */
+
+/** @brief 反馈读取状态机 */
+typedef enum {
+    AX12A_FB_IDLE = 0,
+    AX12A_FB_WAIT_TC,
+    AX12A_FB_WAIT_RX,
+    AX12A_FB_DONE,
+    AX12A_FB_TIMEOUT
+} Ax12aFbState;
+
+/** @brief 反馈读取上下文 */
+typedef struct {
+    Ax12aFbState  state;
+    Ax12a        *servos[5];
+    uint8_t       servoCount;
+    uint8_t       curIdx;
+    uint8_t       rxBuf[16];
+    volatile uint8_t done;
+    uint32_t      timeoutTick;
+    uint8_t       timeoutServo;
+} Ax12aFbContext;
+
+void ax12aStartFeedbackRead(Ax12a **servos, uint8_t count);
+uint8_t ax12aIsFeedbackDone(void);
+void ax12aFeedbackPoll(void);
+
 #ifdef __cplusplus
 }
 #endif

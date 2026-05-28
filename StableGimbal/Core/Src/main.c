@@ -51,6 +51,7 @@ UART_HandleTypeDef huart1;
 UART_HandleTypeDef huart2;
 UART_HandleTypeDef huart3;
 DMA_HandleTypeDef hdma_usart2_rx;
+DMA_HandleTypeDef hdma_usart3_rx;
 
 /* USER CODE BEGIN PV */
 /* 全局实例 */
@@ -218,14 +219,24 @@ int main(void)
       g_controlFlag = 0;
 
       /* ═══════════════════════════════════════════════════════ */
-      /*  舵机反馈读取 (降频至 20Hz)                              */
+      /*  舵机反馈读取 (非阻塞 DMA+IDLE, 降频至 20Hz)            */
       /* ═══════════════════════════════════════════════════════ */
       static uint8_t fbCnt = 0;
-      if (++fbCnt >= FB_DIV) {
+      static uint8_t fbPending = 0;
+
+      if (!fbPending && ++fbCnt >= FB_DIV) {
           fbCnt = 0;
-          ax12aReadFeedback(&g_ax12aPitch);
-          ax12aReadFeedback(&g_ax12aRoll);
-          ax12aReadFeedback(&g_ax12aYaw);
+          Ax12a *servos[] = {&g_ax12aPitch, &g_ax12aRoll, &g_ax12aYaw};
+          ax12aStartFeedbackRead(servos, 3);
+          fbPending = 1;
+      }
+
+      if (fbPending &ax12aIsFeedbackDone()) {
+          fbPending = 0;
+      }
+
+      if (fbPending) {
+          ax12aFeedbackPoll();
       }
 
       /* ═══════════════════════════════════════════════════════ */
@@ -492,7 +503,7 @@ static void MX_USART3_UART_Init(void)
   huart3.Init.Mode = UART_MODE_TX_RX;
   huart3.Init.HwFlowCtl = UART_HWCONTROL_NONE;
   huart3.Init.OverSampling = UART_OVERSAMPLING_16;
-  if (HAL_UART_Init(&huart3) != HAL_OK)
+  if (HAL_HalfDuplex_Init(&huart3) != HAL_OK)
   {
     Error_Handler();
   }
@@ -512,6 +523,9 @@ static void MX_DMA_Init(void)
   __HAL_RCC_DMA1_CLK_ENABLE();
 
   /* DMA interrupt init */
+  /* DMA1_Channel3_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Channel3_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Channel3_IRQn);
   /* DMA1_Channel6_IRQn interrupt configuration */
   HAL_NVIC_SetPriority(DMA1_Channel6_IRQn, 0, 0);
   HAL_NVIC_EnableIRQ(DMA1_Channel6_IRQn);
