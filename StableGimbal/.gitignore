@@ -1,0 +1,36 @@
+# Build directory
+build/
+
+# IDE settings
+.vscode/
+.settings/
+
+# Temporary files
+*.tmp
+*.bak
+*.swp
+*~
+
+# CMake build files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+
+# Object files
+*.o
+*.obj
+*.elf
+*.bin
+*.hex
+*.map
+*.axf
+
+# Debug files
+*.dSYM/
+*.su
+*.idb
+*.pdb
+
+# CMake user-specific files
+CMakeUserPresets.json
