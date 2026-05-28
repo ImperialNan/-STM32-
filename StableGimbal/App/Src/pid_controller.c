@@ -141,6 +141,8 @@ void pidIncInit(PidInc *pid,
     if (dFilterAlpha < 0.0f) dFilterAlpha = 0.0f;
     if (dFilterAlpha > 1.0f) dFilterAlpha = 1.0f;
     pid->dFilterAlpha = dFilterAlpha;
+
+    pid->firstCall = true;
 }
 
 float pidIncCompute(PidInc *pid, float setpoint, float measured, float dt)
@@ -150,6 +152,13 @@ float pidIncCompute(PidInc *pid, float setpoint, float measured, float dt)
     }
 
     float error = fdead(setpoint - measured, pid->deadZone);
+
+    /* 首帧：用当前误差初始化历史值，消除微分项尖峰 */
+    if (pid->firstCall) {
+        pid->prevError  = error;
+        pid->prev2Error = error;
+        pid->firstCall  = false;
+    }
 
     /* 条件积分: 输出已饱和时冻结积分，防止 windup */
     float kiEffective = pid->saturated ? 0.0f : pid->kiPerSec;
@@ -189,6 +198,7 @@ void pidIncReset(PidInc *pid)
     pid->prevDeriv  = 0.0f;
     pid->output     = 0.0f;
     pid->saturated  = false;
+    pid->firstCall  = true;
 }
 
 /* ========================================================================== */

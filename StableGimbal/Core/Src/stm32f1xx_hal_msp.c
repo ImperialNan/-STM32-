@@ -169,7 +169,7 @@ void HAL_UART_MspInit(UART_HandleTypeDef* huart)
     HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
     /* USART1 interrupt Init */
-    HAL_NVIC_SetPriority(USART1_IRQn, 0, 0);
+    HAL_NVIC_SetPriority(USART1_IRQn, 1, 1);
     /* USER CODE BEGIN USART1_MspInit 1 */
 
     /* USER CODE END USART1_MspInit 1 */
@@ -215,9 +215,11 @@ void HAL_UART_MspInit(UART_HandleTypeDef* huart)
     __HAL_LINKDMA(huart,hdmarx,hdma_usart2_rx);
 
     /* USART2 interrupt Init */
-    HAL_NVIC_SetPriority(USART2_IRQn, 0, 1);
+    HAL_NVIC_SetPriority(USART2_IRQn, 0, 0);
     /* USER CODE BEGIN USART2_MspInit 1 */
-
+    /* CubeMX 对 UART 外设不自动生成 HAL_NVIC_EnableIRQ，
+       但 DMA+IDLE 模式需要 NVIC 级中断使能 */
+    HAL_NVIC_EnableIRQ(USART2_IRQn);
     /* USER CODE END USART2_MspInit 1 */
   }
   else if(huart->Instance==USART3)
@@ -255,9 +257,11 @@ void HAL_UART_MspInit(UART_HandleTypeDef* huart)
     __HAL_LINKDMA(huart,hdmarx,hdma_usart3_rx);
 
     /* USART3 interrupt Init */
-    HAL_NVIC_SetPriority(USART3_IRQn, 0, 3);
+    HAL_NVIC_SetPriority(USART3_IRQn, 0, 2);
     /* USER CODE BEGIN USART3_MspInit 1 */
-
+    /* CubeMX 对 UART 外设不自动生成 HAL_NVIC_EnableIRQ，
+       但 DMA+IDLE 和 IT 发送模式需要 NVIC 级中断使能 */
+    HAL_NVIC_EnableIRQ(USART3_IRQn);
     /* USER CODE END USART3_MspInit 1 */
   }
 

@@ -77,6 +77,7 @@ typedef struct {
     float prevDeriv;
     float output;           /* 累计输出 */
     bool  saturated;
+    bool  firstCall;        /* 首帧标志：避免误差历史全零导致的微分尖峰 */
 
 } PidInc;
 

@@ -93,8 +93,165 @@ static void MX_TIM2_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-/* 控制环标志（由 TIM2 中断置位） */
+
+/* ═══════════════════════════════════════════════════════════════════════ */
+/*  模式切换: 1 = 验证固件, 0 = 完整 PID 控制固件                          */
+/* ═══════════════════════════════════════════════════════════════════════ */
+#define VALIDATION_MODE  1
+
+/* 控制环标志（由 TIM2 中断置位）—— 两种模式共用 */
 volatile uint8_t g_controlFlag = 0;
+
+/* 舵机中立位 (AX-12A 角度值) —— 两种模式共用 */
+#define PITCH_NEUTRAL  240.0f
+#define ROLL_NEUTRAL   150.0f
+#define YAW_NEUTRAL    150.0f
+
+#if VALIDATION_MODE
+
+/* 验证阶段枚举 */
+typedef enum {
+    VAL_STAGE_LED      = 0,
+    VAL_STAGE_IMU      = 1,
+    VAL_STAGE_AX12A_RD = 2,
+    VAL_STAGE_AX12A_WR = 3,
+    VAL_STAGE_DONE     = 4
+} ValStage;
+
+static ValStage g_valStage = VAL_STAGE_LED;
+static uint32_t g_valTick  = 0;
+static uint32_t g_valSubTick = 0;
+
+/* 前向声明 */
+static void valRunLed(uint32_t now);
+static void valRunImu(uint32_t now);
+static void valRunAx12aRead(uint32_t now);
+static void valRunAx12aWrite(uint32_t now);
+
+/* ── IMU 数据轮询（100Hz 被动更新, 验证模式下用定时轮询读取） ── */
+static void valPollImu(void)
+{
+    /* jy901sIdleIrqHandler 在 USART2 ISR 中自动填充 g_jy901s 字段,
+       这里只需读取。注意关闭全局中断以保证 float 字段读一致性
+       (Cortex-M3 的 LDR 指令对 float 非原子). */
+    __disable_irq();
+    float p = g_jy901s.pitch;
+    float r = g_jy901s.roll;
+    float y = g_jy901s.yaw;
+    float wx = g_jy901s.wx;
+    float wy = g_jy901s.wy;
+    float wz = g_jy901s.wz;
+    uint8_t ready = g_jy901s.dataReady;
+    __enable_irq();
+
+    if (ready) {
+        printf("IMU: P=%.1f R=%.1f Y=%.1f | Wx=%.1f Wy=%.1f Wz=%.1f\r\n",
+               p, r, y, wx, wy, wz);
+    }
+}
+
+/* ── Stage 1: LED 心跳 ── */
+static void valRunLed(uint32_t now)
+{
+    if ((now - g_valSubTick) >= 500) {
+        g_valSubTick = now;
+        LED_Toggle();
+        printf("STAGE 1: LED & UART1 OK [tick=%lu]\r\n", now);
+    }
+    /* 持续 3 秒后推进 */
+    if ((now - g_valTick) >= 3000) {
+        LED_ON();
+        printf(">>> STAGE 1 PASS: 外设初始化正常, 进入 IMU 测试\r\n\r\n");
+        g_valStage = VAL_STAGE_IMU;
+        g_valTick  = now;
+        g_valSubTick = now;
+    }
+}
+
+/* ── Stage 2: IMU 数据验证 ── */
+static void valRunImu(uint32_t now)
+{
+    if ((now - g_valSubTick) >= 500) {
+        g_valSubTick = now;
+        valPollImu();
+    }
+    if ((now - g_valTick) >= 5000) {
+        printf(">>> STAGE 2 PASS: IMU 数据流正常, 进入舵机读取测试\r\n\r\n");
+        g_valStage = VAL_STAGE_AX12A_RD;
+        g_valTick  = now;
+        g_valSubTick = now;
+    }
+}
+
+/* ── Stage 3: AX-12A READ 验证（阻塞式, 简单可靠） ── */
+static void valRunAx12aRead(uint32_t now)
+{
+    static uint8_t readStep = 0;  /* 0:读Pitch, 1:读Roll, 2:读Yaw, 3:完成 */
+    static uint32_t stepTick = 0;
+
+    /* 间隔 1s 读一个舵机, 避免 RS485 总线碰撞 */
+    if (readStep <= 2 && (now - stepTick) >= 1000) {
+        Ax12a *servo = NULL;
+        const char *name = "";
+        switch (readStep) {
+        case 0: servo = &g_ax12aPitch; name = "Pitch(ID1)"; break;
+        case 1: servo = &g_ax12aRoll;  name = "Roll (ID2)"; break;
+        case 2: servo = &g_ax12aYaw;   name = "Yaw  (ID3)"; break;
+        default: break;
+        }
+
+        HAL_StatusTypeDef st = ax12aReadFeedback(servo);
+        if (st == HAL_OK && servo->feedback.dataValid) {
+            printf("AX12A %s: ANG=%.1f SPD=%.1f LOAD=%.1f%%\r\n",
+                   name,
+                   servo->feedback.angleDeg,
+                   servo->feedback.speedDps,
+                   servo->feedback.loadPct);
+        } else {
+            printf("AX12A %s: READ FAILED (status=%d)\r\n", name, st);
+        }
+        stepTick = now;
+        readStep++;
+    }
+
+    if (readStep >= 3 && (now - g_valTick) >= 4000) {
+        printf(">>> STAGE 3 PASS: 3 舵机通信正常, 进入位置写入测试\r\n\r\n");
+        g_valStage = VAL_STAGE_AX12A_WR;
+        g_valTick  = now;
+        g_valSubTick = now;
+    }
+}
+
+/* ── Stage 4: AX-12A 缓慢回中立位 ── */
+static void valRunAx12aWrite(uint32_t now)
+{
+    static uint8_t writeStep = 0;  /* 0:Pitch, 1:Roll, 2:Yaw, 3:完成 */
+    static uint32_t stepTick = 0;
+
+    struct { Ax12a *s; const char *n; float angle; } cfg[] = {
+        {&g_ax12aPitch, "Pitch", PITCH_NEUTRAL},
+        {&g_ax12aRoll,  "Roll",  ROLL_NEUTRAL},
+        {&g_ax12aYaw,   "Yaw",   YAW_NEUTRAL},
+    };
+
+    /* 间隔 2s，给舵机足够时间运动到目标 */
+    if (writeStep <= 2 && (now - stepTick) >= 2000) {
+        HAL_StatusTypeDef st = ax12aSetPosition(cfg[writeStep].s,
+                                                 cfg[writeStep].angle, 200);
+        printf("AX12A %s: SET %.0f deg (speed=200) status=%d\r\n",
+               cfg[writeStep].n, cfg[writeStep].angle, st);
+        stepTick = now;
+        writeStep++;
+    }
+
+    if (writeStep >= 3 && (now - g_valTick) >= 6000) {
+        printf("\r\n>>> STAGE 4 PASS: 舵机已回到中立位\r\n");
+        printf(">>> 全部验证通过! 将 VALIDATION_MODE 改为 0 并重新编译以运行 PID 控制\r\n");
+        g_valStage = VAL_STAGE_DONE;
+    }
+}
+
+#else /* !VALIDATION_MODE —— 原始 PID 控制代码 */
 
 /* 双速率分频 */
 #define OUTER_DIV  10   /* 100Hz / 10 = 10Hz 外环 */
@@ -104,10 +261,7 @@ volatile uint8_t g_controlFlag = 0;
 #define DT_OUTER  0.1f  /* 外环 dt = 100ms */
 #define DT_INNER  0.01f /* 内环 dt = 10ms  */
 
-/* 舵机中立位 (AX-12A 角度值) */
-#define PITCH_NEUTRAL  240.0f
-#define ROLL_NEUTRAL   150.0f
-#define YAW_NEUTRAL    150.0f
+#endif /* VALIDATION_MODE */
 
 /* USER CODE END 0 */
 
@@ -158,6 +312,7 @@ int main(void)
   ax12aInit(&g_ax12aRoll,  &huart3, 2, 0.0f, 300.0f);
   ax12aInit(&g_ax12aYaw,   &huart3, 3, 100.0f, 200.0f);
 
+#if !VALIDATION_MODE
   /* ══════════════════════════════════════════════════════════════ */
   /*  串级 PID 初始化                                               */
   /*  外环 (位置型): 角度 → 角速度指令, 10Hz                         */
@@ -198,14 +353,19 @@ int main(void)
   g_cascadeYaw.sensor.source       = SENSOR_SRC_FUSION;
   g_cascadeYaw.sensor.imuWeight    = 0.6f;
 
-  /* 启动 IMU DMA+IDLE 接收 */
-  jy901sStartReceive(&g_jy901s);
-
   /* 启动 TIM2 定时器中断（100Hz 控制节拍） */
   HAL_TIM_Base_Start_IT(&htim2);
+#endif /* !VALIDATION_MODE */
+
+  /* 启动 IMU DMA+IDLE 接收（验证模式和控制模式都需要） */
+  jy901sStartReceive(&g_jy901s);
 
   HAL_Delay(500);
   LED_ON();
+  printf("\r\n========================================\r\n");
+  printf("  StableGimbal %s\r\n",
+         VALIDATION_MODE ? "VALIDATION MODE" : "CONTROL MODE");
+  printf("========================================\r\n\r\n");
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -215,6 +375,28 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+#if VALIDATION_MODE
+    /* ══════════════════════════════════════════════════════════════ */
+    /*  验证模式：自动推进 4 阶段测试                                 */
+    /* ══════════════════════════════════════════════════════════════ */
+    {
+      uint32_t now = HAL_GetTick();
+      switch (g_valStage) {
+      case VAL_STAGE_LED:      valRunLed(now);        break;
+      case VAL_STAGE_IMU:      valRunImu(now);        break;
+      case VAL_STAGE_AX12A_RD: valRunAx12aRead(now);  break;
+      case VAL_STAGE_AX12A_WR: valRunAx12aWrite(now); break;
+      case VAL_STAGE_DONE:
+      default:
+          /* 验证完成, 空闲闪烁 */
+          if ((now - g_valSubTick) >= 1000) {
+              g_valSubTick = now;
+              LED_Toggle();
+          }
+          break;
+      }
+    }
+#else  /* !VALIDATION_MODE —— 原始 PID 控制逻辑 */
     if (g_controlFlag) {
       g_controlFlag = 0;
 
@@ -231,7 +413,7 @@ int main(void)
           fbPending = 1;
       }
 
-      if (fbPending &ax12aIsFeedbackDone()) {
+      if (fbPending && ax12aIsFeedbackDone()) {
           fbPending = 0;
       }
 
@@ -240,34 +422,45 @@ int main(void)
       }
 
       /* ═══════════════════════════════════════════════════════ */
-      /*  填充传感器原始数据 (关中断防止 IMU 数据竞态)            */
+      /*  填充传感器原始数据 (关中断防止 IMU/AX-12A 数据竞态)     */
       /* ═══════════════════════════════════════════════════════ */
       __disable_irq();
+      /* IMU 数据快照 */
       float imuPitch  = g_jy901s.pitch;
       float imuRoll   = g_jy901s.roll;
       float imuYaw    = g_jy901s.yaw;
       float imuWx     = g_jy901s.wx;
       float imuWy     = g_jy901s.wy;
       float imuWz     = g_jy901s.wz;
+      /* AX-12A 反馈快照 (ISR 回调中异步写入 float，Cortex-M3 不保证原子性) */
+      float axPitchAngle = g_ax12aPitch.feedback.angleDeg;
+      float axPitchSpeed = g_ax12aPitch.feedback.speedDps;
+      uint8_t axPitchValid = g_ax12aPitch.feedback.dataValid;
+      float axRollAngle  = g_ax12aRoll.feedback.angleDeg;
+      float axRollSpeed  = g_ax12aRoll.feedback.speedDps;
+      uint8_t axRollValid  = g_ax12aRoll.feedback.dataValid;
+      float axYawAngle   = g_ax12aYaw.feedback.angleDeg;
+      float axYawSpeed   = g_ax12aYaw.feedback.speedDps;
+      uint8_t axYawValid   = g_ax12aYaw.feedback.dataValid;
       __enable_irq();
 
       g_cascadePitch.sensor.imuAngle    = imuPitch;
       g_cascadePitch.sensor.imuW        = imuWx;
-      g_cascadePitch.sensor.ax12aAngle  = g_ax12aPitch.feedback.angleDeg;
-      g_cascadePitch.sensor.ax12aSpeed  = g_ax12aPitch.feedback.speedDps;
-      g_cascadePitch.sensor.ax12aValid  = g_ax12aPitch.feedback.dataValid;
+      g_cascadePitch.sensor.ax12aAngle  = axPitchAngle;
+      g_cascadePitch.sensor.ax12aSpeed  = axPitchSpeed;
+      g_cascadePitch.sensor.ax12aValid  = axPitchValid;
 
       g_cascadeRoll.sensor.imuAngle     = imuRoll;
       g_cascadeRoll.sensor.imuW         = imuWy;
-      g_cascadeRoll.sensor.ax12aAngle   = g_ax12aRoll.feedback.angleDeg;
-      g_cascadeRoll.sensor.ax12aSpeed   = g_ax12aRoll.feedback.speedDps;
-      g_cascadeRoll.sensor.ax12aValid   = g_ax12aRoll.feedback.dataValid;
+      g_cascadeRoll.sensor.ax12aAngle   = axRollAngle;
+      g_cascadeRoll.sensor.ax12aSpeed   = axRollSpeed;
+      g_cascadeRoll.sensor.ax12aValid   = axRollValid;
 
       g_cascadeYaw.sensor.imuAngle      = imuYaw;
       g_cascadeYaw.sensor.imuW          = imuWz;
-      g_cascadeYaw.sensor.ax12aAngle    = g_ax12aYaw.feedback.angleDeg;
-      g_cascadeYaw.sensor.ax12aSpeed    = g_ax12aYaw.feedback.speedDps;
-      g_cascadeYaw.sensor.ax12aValid    = g_ax12aYaw.feedback.dataValid;
+      g_cascadeYaw.sensor.ax12aAngle    = axYawAngle;
+      g_cascadeYaw.sensor.ax12aSpeed    = axYawSpeed;
+      g_cascadeYaw.sensor.ax12aValid    = axYawValid;
 
       /* ═══════════════════════════════════════════════════════ */
       /*  双速率串级 PID 控制                                     */
@@ -281,6 +474,7 @@ int main(void)
           /* 外环 PID (位置型, 10Hz) */
           cascadePidComputeOuter(&g_cascadePitch,  0.0f,   DT_OUTER);
           cascadePidComputeOuter(&g_cascadeRoll,   0.0f,   DT_OUTER);
+          /* Yaw 目标 -143°：偏航角指向特定位姿（反向映射），根据实际安装方向调整 */
           cascadePidComputeOuter(&g_cascadeYaw,  -143.0f,  DT_OUTER);
       }
 
@@ -291,12 +485,14 @@ int main(void)
 
       /* ═══════════════════════════════════════════════════════ */
       /*  输出到舵机 (SyncWrite 批量下发)                         */
+      /*  注意: 反馈读取进行中时跳过，避免总线冲突                  */
       /* ═══════════════════════════════════════════════════════ */
-      {
+      if (!fbPending) {
           uint8_t  ids[3]  = {1, 2, 3};
           uint16_t pos[3]  = {
               (uint16_t)((PITCH_NEUTRAL + pitchOff) * AX12A_DEG_TO_POS),
               (uint16_t)((ROLL_NEUTRAL  + rollOff)  * AX12A_DEG_TO_POS),
+              /* Yaw 用减号：舵机机械方向与 PID 输出符号相反 */
               (uint16_t)((YAW_NEUTRAL   - yawOff)   * AX12A_DEG_TO_POS)
           };
           uint16_t spd[3]  = {
@@ -326,6 +522,7 @@ int main(void)
 
       LED_Toggle();
     }
+#endif /* VALIDATION_MODE */
   }
   /* USER CODE END 3 */
 }
@@ -524,7 +721,7 @@ static void MX_DMA_Init(void)
 
   /* DMA interrupt init */
   /* DMA1_Channel3_IRQn interrupt configuration */
-  HAL_NVIC_SetPriority(DMA1_Channel3_IRQn, 0, 0);
+  HAL_NVIC_SetPriority(DMA1_Channel3_IRQn, 0, 1);
   HAL_NVIC_EnableIRQ(DMA1_Channel3_IRQn);
   /* DMA1_Channel6_IRQn interrupt configuration */
   HAL_NVIC_SetPriority(DMA1_Channel6_IRQn, 0, 0);

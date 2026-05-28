@@ -14,6 +14,12 @@
 static uint8_t s_txBuf[32];
 static uint8_t s_rxBuf[16];
 
+/* 等待 TC 标志宏（带超时保护，1Mbaud 下 1 字节约 10μs） */
+#define AX12A_WAIT_TC(huart) do { \
+    uint32_t _tc = 10000;  /* 最多 ~100μs */ \
+    while (__HAL_UART_GET_FLAG(huart, UART_FLAG_TC) == RESET && --_tc) {} \
+} while(0)
+
 /* ========================================================================== */
 /*  内部辅助函数                                                               */
 /* ========================================================================== */
@@ -33,7 +39,7 @@ static HAL_StatusTypeDef sendPacket(UART_HandleTypeDef *huart,
 
     RS485_TX_ENABLE();
     HAL_StatusTypeDef status = HAL_UART_Transmit(huart, packet, len, AX12A_TX_TIMEOUT);
-    while (__HAL_UART_GET_FLAG(huart, UART_FLAG_TC) == RESET) {}
+    AX12A_WAIT_TC(huart);
     RS485_TX_DISABLE();
 
     return status;
@@ -230,8 +236,8 @@ static void sendNextRead(void)
 void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
 {
     if (huart == g_fbUart && g_fbCtx.state == AX12A_FB_WAIT_TC) {
-        /* TX 完成 → 等待最后一位移出 → 切到接收模式 */
-        while (__HAL_UART_GET_FLAG(huart, UART_FLAG_TC) == RESET) {}
+        /* 等待最后一位移出移位寄存器，确保 RS485 总线释放前数据完整发出 */
+        AX12A_WAIT_TC(huart);
 
         RS485_TX_DISABLE();
         HAL_HalfDuplex_EnableReceiver(huart);
@@ -288,10 +294,23 @@ void ax12aStartFeedbackRead(Ax12a **servos, uint8_t count)
     buildReadPacket(first);
 
     RS485_TX_ENABLE();
-    HAL_UART_Transmit(g_fbUart, s_txBuf, 8, AX12A_TX_TIMEOUT);
-    while (__HAL_UART_GET_FLAG(g_fbUart, UART_FLAG_TC) == RESET) {}
-
+    HAL_StatusTypeDef txStatus = HAL_UART_Transmit(g_fbUart, s_txBuf, 8, AX12A_TX_TIMEOUT);
+    AX12A_WAIT_TC(g_fbUart);
     RS485_TX_DISABLE();
+
+    if (txStatus != HAL_OK) {
+        /* 发送失败：标记当前舵机无效，尝试下一个 */
+        g_fbCtx.servos[0]->feedback.dataValid = 0;
+        g_fbCtx.curIdx = 1;
+        if (g_fbCtx.curIdx < g_fbCtx.servoCount) {
+            sendNextRead();
+        } else {
+            g_fbCtx.state = AX12A_FB_DONE;
+            g_fbCtx.done = 1;
+        }
+        return;
+    }
+
     HAL_HalfDuplex_EnableReceiver(g_fbUart);
 
     HAL_UARTEx_ReceiveToIdle_DMA(g_fbUart, g_fbCtx.rxBuf, sizeof(g_fbCtx.rxBuf));

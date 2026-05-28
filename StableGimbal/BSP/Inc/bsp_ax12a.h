@@ -215,16 +215,16 @@ typedef enum {
     AX12A_FB_TIMEOUT
 } Ax12aFbState;
 
-/** @brief 反馈读取上下文 */
+/** @brief 反馈读取上下文 (成员标记 volatile 因为 ISR 和主循环并发访问) */
 typedef struct {
-    Ax12aFbState  state;
-    Ax12a        *servos[5];
-    uint8_t       servoCount;
-    uint8_t       curIdx;
-    uint8_t       rxBuf[16];
-    volatile uint8_t done;
-    uint32_t      timeoutTick;
-    uint8_t       timeoutServo;
+    volatile Ax12aFbState  state;
+    Ax12a                 *servos[5];
+    volatile uint8_t       servoCount;
+    volatile uint8_t       curIdx;
+    uint8_t                rxBuf[16];
+    volatile uint8_t       done;
+    volatile uint32_t      timeoutTick;
+    volatile uint8_t       timeoutServo;
 } Ax12aFbContext;
 
 void ax12aStartFeedbackRead(Ax12a **servos, uint8_t count);
