@@ -22,6 +22,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "bsp_jy901s.h"
+#include "bsp_dynamixel.h"
 #include <stdio.h>
 /* USER CODE END Includes */
 
@@ -43,10 +44,12 @@
 /* Private variables ---------------------------------------------------------*/
 UART_HandleTypeDef huart1;
 UART_HandleTypeDef huart2;
+UART_HandleTypeDef huart3;
 DMA_HandleTypeDef hdma_usart2_rx;
 
 /* USER CODE BEGIN PV */
 Jy901s gJy901s;
+DynamixelBus gDynBus;
 
 /* printf 重定向到 USART1 */
 int __io_putchar(int ch)
@@ -62,6 +65,7 @@ static void MX_GPIO_Init(void);
 static void MX_DMA_Init(void);
 static void MX_USART2_UART_Init(void);
 static void MX_USART1_UART_Init(void);
+static void MX_USART3_UART_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -103,9 +107,30 @@ int main(void)
   MX_DMA_Init();
   MX_USART2_UART_Init();
   MX_USART1_UART_Init();
+  MX_USART3_UART_Init();
   /* USER CODE BEGIN 2 */
   jy901sInit(&gJy901s, &huart2);
   jy901sStartReceive(&gJy901s);
+
+  dynInit(&gDynBus, &huart3, RX485_TX_EN_GPIO_Port, RX485_TX_EN_Pin);
+  HAL_Delay(2000);
+
+  /* 舵机连通性测试：三个舵机在 400↔624 之间各摆动一次 */
+  dynSetMovingSpeed(&gDynBus, 1, 200);
+  dynSetMovingSpeed(&gDynBus, 2, 200);
+  dynSetMovingSpeed(&gDynBus, 3, 200);
+  dynSetGoalPosition(&gDynBus, 1, 400);
+  dynSetGoalPosition(&gDynBus, 2, 400);
+  dynSetGoalPosition(&gDynBus, 3, 400);
+  HAL_Delay(1500);
+  dynSetGoalPosition(&gDynBus, 1, 624);
+  dynSetGoalPosition(&gDynBus, 2, 624);
+  dynSetGoalPosition(&gDynBus, 3, 624);
+  HAL_Delay(1500);
+  dynSetGoalPosition(&gDynBus, 1, 512);
+  dynSetGoalPosition(&gDynBus, 2, 512);
+  dynSetGoalPosition(&gDynBus, 3, 512);
+  HAL_Delay(1500);
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -234,6 +259,39 @@ static void MX_USART2_UART_Init(void)
 }
 
 /**
+  * @brief USART3 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_USART3_UART_Init(void)
+{
+
+  /* USER CODE BEGIN USART3_Init 0 */
+
+  /* USER CODE END USART3_Init 0 */
+
+  /* USER CODE BEGIN USART3_Init 1 */
+
+  /* USER CODE END USART3_Init 1 */
+  huart3.Instance = USART3;
+  huart3.Init.BaudRate = 1000000;
+  huart3.Init.WordLength = UART_WORDLENGTH_8B;
+  huart3.Init.StopBits = UART_STOPBITS_1;
+  huart3.Init.Parity = UART_PARITY_NONE;
+  huart3.Init.Mode = UART_MODE_TX_RX;
+  huart3.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart3.Init.OverSampling = UART_OVERSAMPLING_16;
+  if (HAL_UART_Init(&huart3) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN USART3_Init 2 */
+
+  /* USER CODE END USART3_Init 2 */
+
+}
+
+/**
   * Enable DMA controller clock
   */
 static void MX_DMA_Init(void)
@@ -256,6 +314,7 @@ static void MX_DMA_Init(void)
   */
 static void MX_GPIO_Init(void)
 {
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
   /* USER CODE BEGIN MX_GPIO_Init_1 */
 
   /* USER CODE END MX_GPIO_Init_1 */
@@ -263,6 +322,17 @@ static void MX_GPIO_Init(void)
   /* GPIO Ports Clock Enable */
   __HAL_RCC_GPIOD_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
+  __HAL_RCC_GPIOB_CLK_ENABLE();
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(RX485_TX_EN_GPIO_Port, RX485_TX_EN_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin : RX485_TX_EN_Pin */
+  GPIO_InitStruct.Pin = RX485_TX_EN_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+  HAL_GPIO_Init(RX485_TX_EN_GPIO_Port, &GPIO_InitStruct);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 

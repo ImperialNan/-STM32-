@@ -3,3 +3,6 @@
 [2026-05-28 18:33:Program Success:56FF70064978665650170667 C:\Users\PC\Desktop\TEST\example\7.JY901S控制电路程序 (2)\7.JY901S控制电路程序\obj\calculate.hex
 [2026-05-28 19:18:Program Success:56FF70064978665650170667 C:\Users\PC\Desktop\STM32\StableGimbalV2\build\Debug\StableGimbalV2.hex
 [2026-05-28 19:29:Program Success:56FF70064978665650170667 C:\Users\PC\Desktop\STM32\StableGimbalV2\build\Debug\StableGimbalV2.hex
+[2026-05-29 07:52:Program Success:56FF70064978665650170667 C:\Users\PC\Desktop\STM32\StableGimbalV2\build\Debug\StableGimbalV2.hex
+[2026-05-29 07:58:Program Success:56FF70064978665650170667 C:\Users\PC\Desktop\STM32\StableGimbalV2\build\Debug\StableGimbalV2.hex
+[2026-05-29 08:08:Program Success:56FF70064978665650170667 C:\Users\PC\Desktop\STM32\StableGimbalV2\build\Debug\StableGimbalV2.hex
