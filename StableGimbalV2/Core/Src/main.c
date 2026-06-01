@@ -22,8 +22,10 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "bsp_jy901s.h"
-#include "bsp_dynamixel.h"
+#include "ax12a.h"
+#include "pid.h"
 #include <stdio.h>
+#include <stdlib.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -42,14 +44,20 @@
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
+TIM_HandleTypeDef htim2;
+
 UART_HandleTypeDef huart1;
 UART_HandleTypeDef huart2;
 UART_HandleTypeDef huart3;
 DMA_HandleTypeDef hdma_usart2_rx;
 
 /* USER CODE BEGIN PV */
-Jy901s gJy901s;
-DynamixelBus gDynBus;
+Jy901s g_jy901s;
+Ax12aBus g_ax12aBus;
+CascadedPid g_cascadedPitch;  /* 舵机1 */
+CascadedPid g_cascadedRoll;   /* 舵机2 */
+CascadedPid g_cascadedYaw;    /* 舵机3 */
+uint16_t g_goalPos[3]; /* [0]=Pitch(ID1), [1]=Roll(ID2), [2]=Yaw(ID3) */
 
 /* printf 重定向到 USART1 */
 int __io_putchar(int ch)
@@ -66,6 +74,7 @@ static void MX_DMA_Init(void);
 static void MX_USART2_UART_Init(void);
 static void MX_USART1_UART_Init(void);
 static void MX_USART3_UART_Init(void);
+static void MX_TIM2_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -108,29 +117,43 @@ int main(void)
   MX_USART2_UART_Init();
   MX_USART1_UART_Init();
   MX_USART3_UART_Init();
+  MX_TIM2_Init();
   /* USER CODE BEGIN 2 */
-  jy901sInit(&gJy901s, &huart2);
-  jy901sStartReceive(&gJy901s);
 
-  dynInit(&gDynBus, &huart3, RX485_TX_EN_GPIO_Port, RX485_TX_EN_Pin);
+  /* ---- 硬件初始化 ---- */
+  jy901sInit(&g_jy901s, &huart2);
+  jy901sStartReceive(&g_jy901s);
+
+  ax12aInit(&g_ax12aBus, &huart3, RX485_TX_EN_GPIO_Port,
+            RX485_TX_EN_Pin);
   HAL_Delay(2000);
 
-  /* 舵机连通性测试：三个舵机在 400↔624 之间各摆动一次 */
-  dynSetMovingSpeed(&gDynBus, 1, 200);
-  dynSetMovingSpeed(&gDynBus, 2, 200);
-  dynSetMovingSpeed(&gDynBus, 3, 200);
-  dynSetGoalPosition(&gDynBus, 1, 400);
-  dynSetGoalPosition(&gDynBus, 2, 400);
-  dynSetGoalPosition(&gDynBus, 3, 400);
-  HAL_Delay(1500);
-  dynSetGoalPosition(&gDynBus, 1, 624);
-  dynSetGoalPosition(&gDynBus, 2, 624);
-  dynSetGoalPosition(&gDynBus, 3, 624);
-  HAL_Delay(1500);
-  dynSetGoalPosition(&gDynBus, 1, 512);
-  dynSetGoalPosition(&gDynBus, 2, 512);
-  dynSetGoalPosition(&gDynBus, 3, 512);
-  HAL_Delay(1500);
+  /* 初始化舵机为关节模式 + 固定速度 */
+  ax12aSetMovingSpeed(&g_ax12aBus, 1, 300);
+  ax12aSetMovingSpeed(&g_ax12aBus, 2, 300);
+  ax12aSetMovingSpeed(&g_ax12aBus, 3, 300);
+  HAL_Delay(100);
+
+  /* ---- 舵机初始化位置 ---- */
+  g_goalPos[0] = 512;  /* Pitch  =0° 时位置 512 */
+  g_goalPos[1] = 819;  /* Roll   =0° 时位置 819 */
+  g_goalPos[2] = 512;  /* Yaw     初始位置 512 */
+  ax12aSetGoalPosition(&g_ax12aBus, 1, g_goalPos[0]);
+  ax12aSetGoalPosition(&g_ax12aBus, 2, g_goalPos[1]);
+  ax12aSetGoalPosition(&g_ax12aBus, 3, g_goalPos[2]);
+  printf("=== Servos: Pitch=512, Roll=819, Yaw=512 ===\r\n");
+  HAL_Delay(2000);
+
+  /* ---- 初始化 PID (载入调优参数, 目标=0) ---- */
+  extern volatile uint32_t g_pidFlag;
+  cascadedPidInitTuned(&g_cascadedPitch, 0.0f, 1);
+  cascadedPidInitTuned(&g_cascadedRoll,  0.0f, 2);
+  cascadedPidInitTuned(&g_cascadedYaw,   0.0f, 3);
+
+  /* 启动 TIM2 100Hz 中断 */
+  HAL_TIM_Base_Start_IT(&htim2);
+
+  printf("=== Gimbal Ready ===\r\n");
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -140,14 +163,74 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    jy901sPoll(&gJy901s);
+    if (g_pidFlag == 0) {
+        continue;
+    }
+    g_pidFlag--;
 
-    if (jy901sIsDataReady(&gJy901s)) {
-        jy901sClearDataReady(&gJy901s);
-        printf("A: P=%7.2f R=%7.2f Y=%7.2f | ",
-               gJy901s.pitch, gJy901s.roll, gJy901s.yaw);
-        printf("G: Wx=%7.2f Wy=%7.2f Wz=%7.2f\r\n",
-               gJy901s.wx, gJy901s.wy, gJy901s.wz);
+    jy901sPoll(&g_jy901s);
+
+    if (!jy901sIsDataReady(&g_jy901s)) {
+        continue;
+    }
+    jy901sClearDataReady(&g_jy901s);
+
+    /* 读取当前姿态角和角速度 */
+    float currentPitch = g_jy901s.pitch;
+    float currentRoll  = g_jy901s.roll;
+    float currentYaw   = g_jy901s.yaw;
+    float gyroWy       = g_jy901s.wy;
+    float gyroWx       = g_jy901s.wx;
+    float gyroWz       = g_jy901s.wz;
+
+    /* Pitch 串级控制: 内环 100Hz + 外环 20Hz */
+    {
+        static uint8_t outerCnt = 0;
+
+        pidAx12aPitchOutput(&g_cascadedPitch, gyroWy,
+                            g_goalPos, &g_ax12aBus);
+        outerCnt++;
+        if (outerCnt >= 5) {
+            outerCnt = 0;
+            cascadedPidOuterUpdate(&g_cascadedPitch, currentPitch);
+        }
+    }
+
+    /* Roll 串级控制: 内环 100Hz + 外环 20Hz */
+    {
+        static uint8_t outerCnt = 0;
+
+        pidAx12aRollOutput(&g_cascadedRoll, gyroWx,
+                           g_goalPos, &g_ax12aBus);
+        outerCnt++;
+        if (outerCnt >= 5) {
+            outerCnt = 0;
+            cascadedPidOuterUpdate(&g_cascadedRoll, currentRoll);
+        }
+    }
+
+    /* Yaw 串级控制: 内环 100Hz + 外环 20Hz */
+    {
+        static uint8_t outerCnt = 0;
+
+        pidAx12aYawOutput(&g_cascadedYaw, gyroWz,
+                          g_goalPos, &g_ax12aBus);
+        outerCnt++;
+        if (outerCnt >= 5) {
+            outerCnt = 0;
+            cascadedPidOuterUpdate(&g_cascadedYaw, currentYaw);
+        }
+    }
+
+    /* VOFA+ Firewater: 每10拍打印1次 (10Hz) — 仅姿态角 */
+    {
+        static uint8_t printCnt = 0;
+        printCnt++;
+        if (printCnt >= 10) {
+            printCnt = 0;
+            printf("%.2f,%.2f,%.2f\r\n",
+                   currentPitch, currentRoll, currentYaw);
+        }
     }
   }
   /* USER CODE END 3 */
@@ -190,6 +273,51 @@ void SystemClock_Config(void)
   {
     Error_Handler();
   }
+}
+
+/**
+  * @brief TIM2 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM2_Init(void)
+{
+
+  /* USER CODE BEGIN TIM2_Init 0 */
+
+  /* USER CODE END TIM2_Init 0 */
+
+  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+
+  /* USER CODE BEGIN TIM2_Init 1 */
+
+  /* USER CODE END TIM2_Init 1 */
+  htim2.Instance = TIM2;
+  htim2.Init.Prescaler = 71;
+  htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim2.Init.Period = 9999;
+  htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim2, &sClockSourceConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim2, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM2_Init 2 */
+
+  /* USER CODE END TIM2_Init 2 */
+
 }
 
 /**
