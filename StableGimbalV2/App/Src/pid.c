@@ -12,20 +12,6 @@
 /* ========================= 公开 API 实现 =========================== */
 
 /**
- * @brief   角度归一化到 [-180, 180]
- */
-float pidNormalizeAngle(float angle)
-{
-    while (angle > 180.0f) {
-        angle -= 360.0f;
-    }
-    while (angle < -180.0f) {
-        angle += 360.0f;
-    }
-    return angle;
-}
-
-/**
  * @brief   最短角度差
  */
 float pidShortestAngleDiff(float target, float current)
@@ -41,92 +27,6 @@ float pidShortestAngleDiff(float target, float current)
     return diff;
 }
 
-/**
- * @brief   初始化 PID 状态
- */
-void pidInit(PidState *pid, float kp, float ki, float kd,
-             float target, float integThreshold)
-{
-    pid->kp             = kp;
-    pid->ki             = ki;
-    pid->kd             = kd;
-    pid->targetAngle    = target;
-    pid->integralError  = 0.0f;
-    pid->filteredGyro   = 0.0f;
-    pid->integThreshold = integThreshold;
-}
-
-/**
- * @brief   PID 核心更新
- * @note    pidOutput = Kp * error + Ki * integral - Kd * filteredGyro
- */
-float pidUpdate(PidState *pid, float currentAngle, float gyro)
-{
-    float angleError;
-    float pidOutput;
-
-    /* 1. 角速度一阶低通滤波 */
-    pid->filteredGyro += PID_ALPHA * (gyro - pid->filteredGyro);
-
-    /* 2. 最短角度差 */
-    angleError = pidShortestAngleDiff(pid->targetAngle,
-                                      currentAngle);
-
-    /* 3. 积分累加 (仅当误差 < 各轴配置的阈值时) */
-    if (angleError > -pid->integThreshold &&
-        angleError <  pid->integThreshold) {
-        pid->integralError += angleError * PID_TS;
-        /* 积分限幅 */
-        if (pid->integralError >  PID_INTEG_LIMIT) {
-            pid->integralError =  PID_INTEG_LIMIT;
-        }
-        if (pid->integralError < -PID_INTEG_LIMIT) {
-            pid->integralError = -PID_INTEG_LIMIT;
-        }
-    }
-
-    /* 4. PID 计算 */
-    pidOutput = pid->kp * angleError
-              + pid->ki * pid->integralError
-              - pid->kd * pid->filteredGyro;
-
-    return pidOutput;
-}
-
-/**
- * @brief   初始化 Yaw 校准状态
- */
-void pidCalibInit(YawCalibration *cal)
-{
-    cal->sum       = 0.0f;
-    cal->count     = 0;
-    cal->startTime = 0;
-    cal->done      = 0;
-}
-
-/**
- * @brief   累加 Yaw 校准样本
- */
-void pidCalibAddSample(YawCalibration *cal, float yaw)
-{
-    if (cal->done) {
-        return;
-    }
-    cal->sum += yaw;
-    cal->count++;
-}
-
-/**
- * @brief   获取校准后的 Yaw 中心角度
- */
-float pidCalibGetCenter(const YawCalibration *cal)
-{
-    if (cal->count == 0) {
-        return 0.0f;
-    }
-    return cal->sum / (float)cal->count;
-}
-
 /* ======================= 串级 PID 实现 ============================ */
 
 /**
@@ -140,7 +40,7 @@ void cascadedPidInit(CascadedPid *cp, float target)
     cp->outerKd        = 0.0f;
     cp->outerIntegral  = 0.0f;
     cp->outerIntegThreshold = 20.0f;
-    cp->outerOutputMax = 120.0f;
+    cp->outerOutputMax = OUTER_OUTPUT_MAX;
     cp->outerDeadband  = 0.5f;
     /* 内环全零 */
     cp->innerKp        = 0.0f;
@@ -151,7 +51,6 @@ void cascadedPidInit(CascadedPid *cp, float target)
     cp->innerDeadband  = 1.0f;
     cp->innerOutputMax = 60.0f;
     /* 运行时 */
-    cp->filteredGyro     = 0.0f;
     cp->dFilteredGyro    = 0.0f;
     cp->lastGyro         = 0.0f;
     cp->lastOuterError   = 0.0f;
@@ -190,17 +89,23 @@ void cascadedPidOuterUpdate(CascadedPid *cp, float currentAngle)
     /* 外环微分 (误差变化率, dt=5*PID_TS=50ms) */
     {
         float dt = 5.0f * PID_TS;
-        cp->targetAngularVel += cp->outerKd *
-            (angleError - cp->lastOuterError) / dt;
+        float dError = angleError - cp->lastOuterError;
+
+        /* 角度跳变保护: 检测 ±180° 死点附近的突变 */
+        if (dError > 180.0f || dError < -180.0f) {
+            dError = 0.0f;  /* 跳过本次 D 项 */
+        }
+
+        cp->targetAngularVel += cp->outerKd * dError / dt;
         cp->lastOuterError = angleError;
     }
 
     /* 外环输出限幅 */
-    if (cp->targetAngularVel >  cp->outerOutputMax) {
-        cp->targetAngularVel =  cp->outerOutputMax;
+    if (cp->targetAngularVel >  OUTER_OUTPUT_MAX) {
+        cp->targetAngularVel =  OUTER_OUTPUT_MAX;
     }
-    if (cp->targetAngularVel < -cp->outerOutputMax) {
-        cp->targetAngularVel = -cp->outerOutputMax;
+    if (cp->targetAngularVel < -OUTER_OUTPUT_MAX) {
+        cp->targetAngularVel = -OUTER_OUTPUT_MAX;
     }
 }
 
@@ -214,11 +119,8 @@ float cascadedPidInnerUpdate(CascadedPid *cp, float gyro)
     float velError;
     float output;
 
-    /* ---- 陀螺低通滤波 ---- */
-    cp->filteredGyro += PID_ALPHA * (gyro - cp->filteredGyro);
-
-    /* ---- 角速度误差 ---- */
-    velError = cp->targetAngularVel - cp->filteredGyro;
+    /* ---- 角速度误差 (直接使用原始陀螺值) ---- */
+    velError = cp->targetAngularVel - gyro;
 
     /* 内环死区 */
     if (velError > -cp->innerDeadband &&
@@ -264,52 +166,50 @@ void cascadedPidInitTuned(CascadedPid *cp, float target, uint8_t axis)
 
     if (axis == 1) {
         /* Pitch */
-        cp->innerKp        = 0.016f;
+        cp->innerKp        = 0.03f;
         cp->innerKi        = 0.0f;
-        cp->innerKd        = 0.0001f;
+        cp->innerKd        = 0.0f;
         cp->innerOutputMax = 60.0f;
-        cp->outerKp        = 12.0f;
-        cp->outerKi        = 0.1f;
+        cp->outerKp        = 3.0f;
+        cp->outerKi        = 0.0f;
         cp->outerKd        = 0.0f;
     } else if (axis == 2) {
         /* Roll */
-        cp->innerKp        = 0.016f;
+        cp->innerKp        = 0.018f;
         cp->innerKi        = 0.0f;
-        cp->innerKd        = 0.0f;
+        cp->innerKd        = 0.00f;
         cp->innerOutputMax = 60.0f;
-        cp->outerKp        = 10.0f;
-        cp->outerKi        = 0.1f;
-        cp->outerKd        = 0.0f;
+        cp->outerKp        = 9.0f;
+        cp->outerKi        = 0.0f;
+        cp->outerKd        = 0.3f;
     } else {
         /* Yaw */
-        cp->innerKp        = 0.015f;
+        cp->innerKp        = 0.018f;
         cp->innerKi        = 0.0f;
         cp->innerKd        = 0.0f;
         cp->innerOutputMax = 60.0f;
-        cp->outerKp        = 6.0f;
-        cp->outerKi        = 1.5f;
-        cp->outerKd        = 0.5f;
+        cp->outerKp        = 9.0f;
+        cp->outerKi        = 0.0f;
+        cp->outerKd        = 0.3f;
     }
 }
 
 /* ======================= 舵机输出封装 ============================== */
-
-#define OUT_DELTA_MAX 15.0f
 
 void pidAx12aPitchOutput(CascadedPid *cp, float gyro,
                          uint16_t *goalPos, void *bus)
 {
     Ax12aBus *axBus = (Ax12aBus *)bus;
 
-    float pidOut   = cascadedPidInnerUpdate(cp, gyro);
+    float pidOut   = -cascadedPidInnerUpdate(cp, gyro);
     float deltaPos = pidOut * PID_POS_SCALE;
 
     if (deltaPos >  OUT_DELTA_MAX) { deltaPos =  OUT_DELTA_MAX; }
     if (deltaPos < -OUT_DELTA_MAX) { deltaPos = -OUT_DELTA_MAX; }
 
     int32_t newPos = (int32_t)goalPos[0] + (int32_t)deltaPos;
-    if (newPos < 0)    { newPos = 0;    }
-    if (newPos > 1023) { newPos = 1023; }
+    if (newPos < PITCH_POS_MIN) { newPos = PITCH_POS_MIN; }
+    if (newPos > PITCH_POS_MAX) { newPos = PITCH_POS_MAX; }
     goalPos[0] = (uint16_t)newPos;
     ax12aSetGoalPosition(axBus, 1, goalPos[0]);
 }
@@ -319,15 +219,15 @@ void pidAx12aRollOutput(CascadedPid *cp, float gyro,
 {
     Ax12aBus *axBus = (Ax12aBus *)bus;
 
-    float pidOut   = cascadedPidInnerUpdate(cp, gyro);
+    float pidOut   = -cascadedPidInnerUpdate(cp, gyro);
     float deltaPos = pidOut * PID_POS_SCALE;
 
     if (deltaPos >  OUT_DELTA_MAX) { deltaPos =  OUT_DELTA_MAX; }
     if (deltaPos < -OUT_DELTA_MAX) { deltaPos = -OUT_DELTA_MAX; }
 
     int32_t newPos = (int32_t)goalPos[1] + (int32_t)deltaPos;
-    if (newPos < 0)    { newPos = 0;    }
-    if (newPos > 1023) { newPos = 1023; }
+    if (newPos < ROLL_POS_MIN) { newPos = ROLL_POS_MIN; }
+    if (newPos > ROLL_POS_MAX) { newPos = ROLL_POS_MAX; }
     goalPos[1] = (uint16_t)newPos;
     ax12aSetGoalPosition(axBus, 2, goalPos[1]);
 }
@@ -344,8 +244,8 @@ void pidAx12aYawOutput(CascadedPid *cp, float gyro,
     if (deltaPos < -OUT_DELTA_MAX) { deltaPos = -OUT_DELTA_MAX; }
 
     int32_t newPos = (int32_t)goalPos[2] + (int32_t)deltaPos;
-    if (newPos < 0)    { newPos = 0;    }
-    if (newPos > 1023) { newPos = 1023; }
+    if (newPos < YAW_POS_MIN) { newPos = YAW_POS_MIN; }
+    if (newPos > YAW_POS_MAX) { newPos = YAW_POS_MAX; }
     goalPos[2] = (uint16_t)newPos;
     ax12aSetGoalPosition(axBus, 3, goalPos[2]);
 }

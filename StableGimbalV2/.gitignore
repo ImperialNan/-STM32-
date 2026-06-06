@@ -1,3 +1,38 @@
-build
-mx.scratch
-!.settings
+# Build artifacts
+build/
+cmake-build-*/
+mx.scratch/
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# STM32CubeMX
+.mxproject
+
+# Tools (binaries - keep scripts only)
+.tools/*.exe
+.tools/*.EXE
+.tools/ProgramLogs.txt
+
+# VOFA+ (optional, not needed for build)
+.vofa+/
+
+# Documentation (not needed for build)
+.documents/
+
+# Copilot skills (not needed for build)
+.github/
+
+# OS files
+Thumbs.db
+Desktop.ini
+.DS_Store
