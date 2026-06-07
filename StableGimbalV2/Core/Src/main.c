@@ -21,7 +21,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include "bsp_jy901s.h"
+#include "jy901s.h"
 #include "ax12a.h"
 #include "pid.h"
 #include <stdio.h>
@@ -129,26 +129,26 @@ int main(void)
   HAL_Delay(2000);
 
   /* 初始化舵机为关节模式 + 固定速度 */
-  ax12aSetMovingSpeed(&g_ax12aBus, 1, 300);
-  ax12aSetMovingSpeed(&g_ax12aBus, 2, 300);
-  ax12aSetMovingSpeed(&g_ax12aBus, 3, 300);
+  ax12aSetMovingSpeed(&g_ax12aBus, 1, 200);
+  ax12aSetMovingSpeed(&g_ax12aBus, 2, 200);
+  ax12aSetMovingSpeed(&g_ax12aBus, 3, 200);
   HAL_Delay(100);
 
   /* ---- 舵机初始化位置 ---- */
-  g_goalPos[0] = 512;  /* Pitch  =0° 时位置 512 */
-  g_goalPos[1] = 819;  /* Roll   =0° 时位置 819 */
-  g_goalPos[2] = 512;  /* Yaw     初始位置 512 */
+  g_goalPos[0] = 512;  /* Servo1 Pitch 初始位置 512 */
+  g_goalPos[1] = 512;  /* Servo2 Roll  初始位置 512 */
+  g_goalPos[2] = 512;  /* Servo3 Yaw   初始位置 512 */
   ax12aSetGoalPosition(&g_ax12aBus, 1, g_goalPos[0]);
   ax12aSetGoalPosition(&g_ax12aBus, 2, g_goalPos[1]);
   ax12aSetGoalPosition(&g_ax12aBus, 3, g_goalPos[2]);
-  printf("=== Servos: Pitch=512, Roll=819, Yaw=512 ===\r\n");
+  printf("=== Servos: Servo1(Pitch)=512, Servo2(Roll)=512, Servo3(Yaw)=512 ===\r\n");
   HAL_Delay(2000);
 
-  /* ---- 初始化 PID (载入调优参数, 目标=0) ---- */
+  /* ---- 初始化 PID ---- */
   extern volatile uint32_t g_pidFlag;
-  cascadedPidInitTuned(&g_cascadedPitch, 0.0f, 1);
-  cascadedPidInitTuned(&g_cascadedRoll,  0.0f, 2);
-  cascadedPidInitTuned(&g_cascadedYaw,   0.0f, 3);
+  cascadedPidInitTuned(&g_cascadedPitch,  0.0f, 1);  /* 舵机1 Pitch 稳定中心 0° */
+  cascadedPidInitTuned(&g_cascadedRoll,   0.0f, 2);  /* 舵机2 Roll  稳定中心 0° */
+  cascadedPidInitTuned(&g_cascadedYaw,    0.0f, 3);  /* 舵机3 Yaw   稳定中心 0° */
 
   /* 启动 TIM2 100Hz 中断 */
   HAL_TIM_Base_Start_IT(&htim2);
@@ -163,6 +163,7 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+
     if (g_pidFlag == 0) {
         continue;
     }
@@ -183,7 +184,7 @@ int main(void)
     float gyroWx       = g_jy901s.wx;
     float gyroWz       = g_jy901s.wz;
 
-    /* Pitch 串级控制: 内环 100Hz + 外环 20Hz */
+    /* Servo1 Pitch 串级控制: 内环 100Hz + 外环 20Hz */
     {
         static uint8_t outerCnt = 0;
 
@@ -210,17 +211,17 @@ int main(void)
     }
 
     /* Yaw 串级控制: 内环 100Hz + 外环 20Hz */
-    {
-        static uint8_t outerCnt = 0;
+    // {
+    //     static uint8_t outerCnt = 0;
 
-        pidAx12aYawOutput(&g_cascadedYaw, gyroWz,
-                          g_goalPos, &g_ax12aBus);
-        outerCnt++;
-        if (outerCnt >= 5) {
-            outerCnt = 0;
-            cascadedPidOuterUpdate(&g_cascadedYaw, currentYaw);
-        }
-    }
+    //     pidAx12aYawOutput(&g_cascadedYaw, gyroWz,
+    //                       g_goalPos, &g_ax12aBus);
+    //     outerCnt++;
+    //     if (outerCnt >= 5) {
+    //         outerCnt = 0;
+    //         cascadedPidOuterUpdate(&g_cascadedYaw, currentYaw);
+    //     }
+    // }
 
     /* VOFA+ Firewater: 每10拍打印1次 (10Hz) — 仅姿态角 */
     {

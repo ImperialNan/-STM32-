@@ -1,8 +1,8 @@
 /**
  * @file    pid.h
- * @brief   三轴稳定云台 PID 控制器
- * @note    单级 PID + 测量微分 + 一阶低通滤波 + 积分分离
- * @version 1.0
+ * @brief   三轴稳定云台串级 PID 控制器
+ * @note    外环 (角度→目标角速度) 20Hz + 内环 (角速度→舵机输出) 100Hz
+ * @version 1.1
  */
 
 #ifndef PID_H
@@ -23,36 +23,73 @@ extern "C" {
 #define PID_D_FC            53.0f   /* D项巴特沃斯低通截止频率 53Hz (τ≈3ms) */
 #define PID_D_ALPHA         ((2.0f * 3.14159265f * PID_D_FC * PID_TS) / \
                               (2.0f * 3.14159265f * PID_D_FC * PID_TS + 1.0f))
-#define PID_INTEG_LIMIT     500.0f  /* 积分限幅 */
-#define PID_DEFAULT_KP      2.0f    /* 默认比例增益 */
-#define PID_DEFAULT_KI      0.0f    /* 默认积分增益 */
-#define PID_DEFAULT_KD      0.5f    /* 默认微分增益 */
 #define PID_POS_SCALE       (1024.0f / 300.0f)  /* 位/度 */
+
+/* ---- 角度常量 ---- */
+#define PID_ANGLE_WRAP      360.0f              /* 全圆角度 (度) */
+#define PID_HALF_ANGLE      180.0f              /* 半圆角度 (度) */
+
+/* ---- 舵机 (AX-12A) 硬件限制 ---- */
+#define SERVO_PITCH_POS_MIN     0               /* Pitch舵机最小位置 (0°) */
+#define SERVO_PITCH_POS_MAX     1023            /* Pitch舵机最大位置 (300°) */
+#define SERVO_ROLL_POS_MIN      0               /* Roll舵机最小位置 (0°) */
+#define SERVO_ROLL_POS_MAX      1023            /* Roll舵机最大位置 (300°) */
+#define SERVO_YAW_POS_MIN       0               /* Yaw舵机最小位置 (0°) */
+#define SERVO_YAW_POS_MAX       1023            /* Yaw舵机最大位置 (300°) */
+
+/* ---- 外环默认参数 (cascadedPidInit) ---- */
+#define PID_OUTER_INTEG_THRESHOLD   20.0f       /* 外环积分分离阈值 (度) */
+#define PID_OUTER_OUTPUT_MAX        120.0f      /* 外环输出限幅 (°/s) */
+#define PID_OUTER_DEADBAND          0.5f        /* 外环死区 (度) */
+
+/* ---- 内环默认参数 (cascadedPidInit) ---- */
+#define PID_INNER_INTEG_MAX         100.0f      /* 内环积分上限 */
+#define PID_INNER_DEADBAND          1.0f        /* 内环死区 (°/s) */
+#define PID_INNER_OUTPUT_MAX        60.0f       /* 内环输出限幅 (度) */
+
+/* ---- 外环时序 ---- */
+#define PID_OUTER_PERIOD_RATIO      5.0f        /* 外环周期 = 内环周期 × 此值 (5×10ms=50ms, 20Hz) */
+#define PID_OUTER_DT                (PID_OUTER_PERIOD_RATIO * PID_TS)
+
+/* ---- 输出增量限幅 ---- */
+#define PID_OUT_DELTA_MAX           15.0f       /* 单次位置增量限幅 (步) */
+
+/* ---- 轴编号枚举 ---- */
+#define PID_AXIS_PITCH              1
+#define PID_AXIS_ROLL               2
+#define PID_AXIS_YAW                3
+
+/* ---- Pitch 调试参数 ---- */
+#define PID_PITCH_INNER_KP          0.016f
+#define PID_PITCH_INNER_KI          0.0f
+#define PID_PITCH_INNER_KD          0.0f
+#define PID_PITCH_INNER_OUTPUT_MAX  60.0f
+#define PID_PITCH_OUTER_KP          10.0f
+#define PID_PITCH_OUTER_KI          0.1f
+#define PID_PITCH_OUTER_KD          0.3f
+
+/* ---- Roll 调试参数 ---- */
+#define PID_ROLL_INNER_KP           0.016f
+#define PID_ROLL_INNER_KI           0.0f
+#define PID_ROLL_INNER_KD           0.0f
+#define PID_ROLL_INNER_OUTPUT_MAX   60.0f
+#define PID_ROLL_OUTER_KP           6.0f
+#define PID_ROLL_OUTER_KI           0.1f
+#define PID_ROLL_OUTER_KD           0.3f
+
+/* ---- Yaw 调试参数 ---- */
+#define PID_YAW_INNER_KP            0.015f
+#define PID_YAW_INNER_KI            0.0f
+#define PID_YAW_INNER_KD            0.0f
+#define PID_YAW_INNER_OUTPUT_MAX    60.0f
+#define PID_YAW_OUTER_KP            6.0f
+#define PID_YAW_OUTER_KI            1.5f
+#define PID_YAW_OUTER_KD            0.5f
 
 /* ========================= 类型定义 ================================ */
 
 /**
- * @brief   单轴 PID 状态 (单级模式, Roll/Yaw 使用)
- */
-typedef struct {
-    /* 控制参数 */
-    float kp;
-    float ki;
-    float kd;
-
-    /* 运行时状态 */
-    float integralError;
-    float filteredGyro;
-
-    /* 目标 */
-    float targetAngle;
-
-    /* 积分分离阈值 (度), 仅误差 < 此值时累加积分 */
-    float integThreshold;
-} PidState;
-
-/**
- * @brief   串级 PID 状态 (Pitch 使用)
+ * @brief   串级 PID 状态
  * @note    外环 (角度→目标角速度) 20Hz + 内环 (角速度→舵机输出) 100Hz
  */
 typedef struct {
@@ -83,63 +120,7 @@ typedef struct {
     float targetAngularVel; /* 外环输出的目标角速度 (°/s) */
 } CascadedPid;
 
-/**
- * @brief   轴配置参数
- */
-typedef struct {
-    float angleMin;
-    float angleMax;
-    uint16_t posMin;
-    uint16_t posMax;
-    float posScale;
-} AxisConfig;
-
-/**
- * @brief   Yaw 校准状态
- */
-typedef struct {
-    float sum;
-    uint32_t count;
-    uint32_t startTime;
-    uint8_t done;
-} YawCalibration;
-
 /* ========================= 公开 API ================================ */
-
-/**
- * @brief   角度归一化到 [-180, 180]
- * @param   angle 输入角度 (度)
- * @return  归一化后的角度
- */
-float pidNormalizeAngle(float angle);
-
-/**
- * @brief   最短角度差
- * @param   target 目标角度 (度)
- * @param   current 当前角度 (度)
- * @return  最短角度差 (度), 范围 [-180, 180]
- */
-float pidShortestAngleDiff(float target, float current);
-
-/**
- * @brief   初始化 PID 状态
- * @param   pid    PID 状态指针
- * @param   kp     比例增益
- * @param   ki     积分增益
- * @param   kd     微分增益
- * @param   target 初始目标角度
- */
-void pidInit(PidState *pid, float kp, float ki, float kd,
-             float target, float integThreshold);
-
-/**
- * @brief   PID 核心更新 (通用)
- * @param   pid         PID 状态指针
- * @param   currentAngle 当前角度 (度)
- * @param   gyro        当前轴角速度 (°/s)
- * @return  PID 输出 (度)
- */
-float pidUpdate(PidState *pid, float currentAngle, float gyro);
 
 /**
  * @brief   初始化串级 PID (所有参数默认=0, 目标=target)
@@ -192,25 +173,6 @@ void pidAx12aRollOutput(CascadedPid *cp, float gyro,
  */
 void pidAx12aYawOutput(CascadedPid *cp, float gyro,
                        uint16_t *goalPos, void *bus);
-/**
- * @brief   初始化 Yaw 校准状态
- * @param   cal 校准状态指针
- */
-void pidCalibInit(YawCalibration *cal);
-
-/**
- * @brief   累加 Yaw 校准样本
- * @param   cal   校准状态指针
- * @param   yaw   当前 Yaw 角度 (度)
- */
-void pidCalibAddSample(YawCalibration *cal, float yaw);
-
-/**
- * @brief   获取校准后的 Yaw 中心角度
- * @param   cal 校准状态指针
- * @return  Yaw 中心角度 (度)
- */
-float pidCalibGetCenter(const YawCalibration *cal);
 
 #ifdef __cplusplus
 }

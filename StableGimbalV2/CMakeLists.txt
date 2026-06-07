@@ -44,7 +44,7 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
 
 # Add sources to executable
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
-    Bsp/Src/bsp_jy901s.c
+    Bsp/Src/jy901s.c
     Bsp/Src/ax12a.c
     App/Src/pid.c
 )
